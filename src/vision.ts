@@ -62,29 +62,27 @@ type Skin = "classic" | "unknown";
 
 function detectSkin(img: ImageData): Skin {
   // Classic skin: dominant gray value is 192 or 198
-  // Count pixels at key gray values
-  let gray198 = 0;
-  let gray192 = 0;
-  let gray128 = 0;
-  const sampleStep = 3; // sample every 3rd pixel for speed
+  // Count pixels at key gray values (with JPEG tolerance)
+  let grayFace = 0;   // ~192-200 (cell face / frame)
+  let grayBorder = 0; // ~128 (cell borders)
+  const sampleStep = 3;
 
   for (let y = 0; y < img.height; y += sampleStep) {
     for (let x = 0; x < img.width; x += sampleStep) {
       const [r, g, b] = getPixel(img, x, y);
-      if (Math.max(r, g, b) - Math.min(r, g, b) > 10) continue; // skip colored
+      if (Math.max(r, g, b) - Math.min(r, g, b) > 15) continue; // skip colored
       const gray = Math.round((r + g + b) / 3);
-      if (gray >= 196 && gray <= 200) gray198++;
-      if (gray >= 190 && gray <= 194) gray192++;
-      if (gray >= 126 && gray <= 130) gray128++;
+      if (gray >= 185 && gray <= 205) grayFace++;
+      if (gray >= 120 && gray <= 136) grayBorder++;
     }
   }
 
   const totalSampled = Math.floor(img.width / sampleStep) * Math.floor(img.height / sampleStep);
-  const classicGrayPct = (gray198 + gray192) / totalSampled;
-  const borderPct = gray128 / totalSampled;
+  const classicGrayPct = grayFace / totalSampled;
+  const borderPct = grayBorder / totalSampled;
 
-  // Classic skin: >20% of pixels are gray 192-200, with some 128 borders
-  if (classicGrayPct > 0.2 && borderPct > 0.02) {
+  // Classic skin: >20% of pixels are face gray, with some border gray
+  if (classicGrayPct > 0.15 && borderPct > 0.01) {
     return "classic";
   }
 
@@ -92,12 +90,35 @@ function detectSkin(img: ImageData): Skin {
 }
 
 // --- Classic skin grid detection ---
-// The classic skin has exact pixel values:
-//   198 = revealed cell interior
-//   128 = cell border (shadow side of bevel)
-//   255 = cell bevel highlight
-//   165 = anti-aliased transition between 128 and 198
-// Cell borders (128 value) appear at exactly cellSize intervals.
+// The classic skin has characteristic pixel values:
+//   ~198 = revealed cell interior
+//   ~128 = cell border (shadow side of bevel)
+//   ~255 = cell bevel highlight
+//   ~165 = anti-aliased transition between 128 and 198
+// Cell borders (~128 value) appear at cellSize intervals.
+// JPEG compression shifts these values by ±5, so we use tolerant matching.
+
+const BORDER_TOL = 4;  // tolerance for 128 border gray
+const FACE_TOL = 6;    // tolerance for 198 face gray
+const WHITE_TOL = 8;   // tolerance for 255 highlight
+
+function isBorderGray(r: number, g: number, b: number): boolean {
+  return Math.abs(r - 128) <= BORDER_TOL &&
+         Math.abs(g - 128) <= BORDER_TOL &&
+         Math.abs(b - 128) <= BORDER_TOL &&
+         Math.max(r, g, b) - Math.min(r, g, b) <= 6;
+}
+
+function isFaceGray(r: number, g: number, b: number): boolean {
+  return Math.abs(r - 198) <= FACE_TOL &&
+         Math.abs(g - 198) <= FACE_TOL &&
+         Math.abs(b - 198) <= FACE_TOL &&
+         Math.max(r, g, b) - Math.min(r, g, b) <= 8;
+}
+
+function isWhite(r: number, g: number, b: number): boolean {
+  return r >= 255 - WHITE_TOL && g >= 255 - WHITE_TOL && b >= 255 - WHITE_TOL;
+}
 
 function detectClassicGrid(img: ImageData): {
   colBorders: number[]; rowBorders: number[]; cellSize: number; rows: number; cols: number;
@@ -111,7 +132,7 @@ function detectClassicGrid(img: ImageData): {
 
   for (let x = 0; x < width; x++) {
     const [r, g, b] = getPixel(img, x, scanY);
-    if (r === 128 && g === 128 && b === 128) {
+    if (isBorderGray(r, g, b)) {
       borderPositions.push(x);
     }
   }
@@ -126,13 +147,13 @@ function detectClassicGrid(img: ImageData): {
     clusterStart = pos;
   }
 
-  if (borderLines.length < 6) return null;
+  if (borderLines.length < 4) return null;
 
   // Find the dominant spacing = cell size
   const spacings = new Map<number, number>();
   for (let i = 1; i < borderLines.length; i++) {
     const s = borderLines[i]! - borderLines[i - 1]!;
-    if (s >= 10 && s <= 60) {
+    if (s >= 10 && s <= 150) {
       spacings.set(s, (spacings.get(s) ?? 0) + 1);
     }
   }
@@ -159,7 +180,7 @@ function detectClassicGrid(img: ImageData): {
   // Filter to only borders at the dominant spacing.
   // Use maxSkip=3 for columns since numbers can create wider gaps.
   const gridCols = findGridLines(borderLines, cellSize, 3);
-  if (gridCols.length < 6) return null;
+  if (gridCols.length < 4) return null;
 
   // Scan vertically across multiple cell-interior x-positions to find
   // horizontal row borders. Number text can interrupt 128 border pixels,
@@ -172,7 +193,7 @@ function detectClassicGrid(img: ImageData): {
 
     for (let y = 0; y < height; y++) {
       const [r, g, b] = getPixel(img, scanX, y);
-      if (r === 128 && g === 128 && b === 128) {
+      if (isBorderGray(r, g, b)) {
         vBorderSet.add(y);
       }
     }
@@ -190,7 +211,7 @@ function detectClassicGrid(img: ImageData): {
   }
 
   const gridRows = findGridLines(vBorderLines, cellSize);
-  if (gridRows.length < 6) return null;
+  if (gridRows.length < 4) return null;
 
   // gridCols/gridRows contain the border lines between cells.
   // Add a border line before the first cell if there's board content there.
@@ -208,7 +229,7 @@ function detectClassicGrid(img: ImageData): {
   if (cellBeforeRow >= 0) {
     const midX = gridCols[Math.floor(gridCols.length / 2)]!;
     const [r, g, b] = getPixel(img, midX, cellBeforeRow);
-    if (r === 128 && g === 128 && b === 128 && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
+    if (isBorderGray(r, g, b) && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
       gridRows.unshift(cellBeforeRow);
     }
   }
@@ -226,7 +247,7 @@ function detectClassicGrid(img: ImageData): {
     let is128count = 0;
     for (let y = gridRows[0]!; y < gridRows[gridRows.length - 1]!; y += 10) {
       const [r, g, b] = getPixel(img, x, y);
-      if (r === 128 && g === 128 && b === 128) is128count++;
+      if (isBorderGray(r, g, b)) is128count++;
     }
     // If most sampled pixels are 128, this is the frame border
     const totalSamples = Math.floor((gridRows[gridRows.length - 1]! - gridRows[0]!) / 10);
@@ -242,7 +263,7 @@ function detectClassicGrid(img: ImageData): {
     let is128count = 0;
     for (let x = gridCols[0]!; x < gridCols[gridCols.length - 1]!; x += 10) {
       const [r, g, b] = getPixel(img, x, y);
-      if (r === 128 && g === 128 && b === 128) is128count++;
+      if (isBorderGray(r, g, b)) is128count++;
     }
     const totalSamples = Math.floor((gridCols[gridCols.length - 1]! - gridCols[0]!) / 10);
     if (is128count > totalSamples * 0.8) {
@@ -272,7 +293,7 @@ function detectClassicGrid(img: ImageData): {
   const cols = gridCols.length - 1;
   const rows = gridRows.length - 1;
 
-  if (rows < 5 || cols < 5 || rows > 50 || cols > 50) return null;
+  if (rows < 3 || cols < 3 || rows > 50 || cols > 50) return null;
 
   // Return actual border positions (not computed from uniform cellSize).
   // This handles non-uniform cell sizes from resized screenshots.
@@ -344,8 +365,8 @@ function hasBoardContent(img: ImageData, cellX: number, cellY: number, cellSize:
       if (x < 0 || x >= img.width || y < 0 || y >= img.height) return false;
       const [r, g, b] = getPixel(img, x, y);
       total++;
-      if (r === 198 && g === 198 && b === 198) count198++;
-      if (r === 255 && g === 255 && b === 255) count255++;
+      if (isFaceGray(r, g, b)) count198++;
+      if (isWhite(r, g, b)) count255++;
       if (Math.max(r, g, b) - Math.min(r, g, b) > 20) countColor++;
     }
   }
@@ -462,7 +483,7 @@ function classifyClassicCell(
       const x = cellX + dx;
       if (x >= img.width) continue;
       const [r, g, b] = getPixel(img, x, y);
-      if (r >= 245 && g >= 245 && b >= 245) whites++;
+      if (isWhite(r, g, b)) whites++;
     }
     if (whites > maxWhiteInRow) maxWhiteInRow = whites;
   }
