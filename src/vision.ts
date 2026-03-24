@@ -631,68 +631,87 @@ function detectCleanOneGrid(img: ImageData): {
   // revealed (dark). This finds the board without needing to pre-compute bounds.
   // We scan at cell-pitch intervals starting from every possible offset.
 
-  // Try all possible grid offsets (0 to cellW-1) and find the one where
-  // the most cell-sized windows classify as board content.
-  let bestOffX = 0, bestOffY = 0, bestBoardCount = 0;
-  const offStep = Math.max(1, Math.floor(cellW / 8));
+  // Find the grid offset by maximizing the derivative signal at grid line
+  // positions. The R-channel projection has edges at cell boundaries —
+  // the offset where these edges align with the pitch gives the true grid.
 
-  for (let offX = 0; offX < cellW; offX += offStep) {
-    for (let offY = 0; offY < cellH; offY += offStep) {
-      let boardCount = 0;
-      for (let cy = offY; cy + cellH <= height; cy += cellH) {
-        for (let cx = offX; cx + cellW <= width; cx += cellW) {
-          // Score cells that are cleanly orange OR cleanly dark (not mixed).
-          // Well-aligned grids have pure cells; misaligned ones straddle boundaries.
-          const inset = Math.floor(Math.min(cellW, cellH) * 0.2);
-          let orangeCount = 0, darkCount = 0, sampled = 0;
-          for (let dy = inset; dy < cellH - inset; dy += 4) {
-            for (let dx = inset; dx < cellW - inset; dx += 4) {
-              const px = cx + dx, py = cy + dy;
-              if (px >= width || py >= height) continue;
-              sampled++;
-              const [r, g, b] = getPixel(img, px, py);
-              if (isCleanOneOrange(r, g, b)) orangeCount++;
-              else if (isCleanOneDark(r, g, b)) darkCount++;
-            }
-          }
-          if (sampled < 4) continue;
-          const oPct = orangeCount / sampled;
-          const dPct = darkCount / sampled;
-          // Cell is "clean" if it's mostly one type (>60% orange OR >60% dark)
-          if (oPct > 0.6 || dPct > 0.6) boardCount++;
-        }
-      }
-      if (boardCount > bestBoardCount) {
-        bestBoardCount = boardCount;
-        bestOffX = offX;
-        bestOffY = offY;
-      }
+  // Horizontal projection derivative
+  const hProj: number[] = [];
+  for (let x = 0; x < width; x++) {
+    let sum = 0, count = 0;
+    for (let y = 0; y < height; y += 3) {
+      const [r] = getPixel(img, x, y);
+      sum += r; count++;
     }
+    hProj.push(sum / count);
+  }
+  const hDeriv: number[] = [];
+  for (let i = 1; i < hProj.length; i++) {
+    hDeriv.push(Math.abs(hProj[i]! - hProj[i - 1]!));
   }
 
-  if (bestBoardCount < 3) return null;
+  // Find best horizontal offset: sum derivative at grid line positions
+  let bestOffX = 0, bestHScore = 0;
+  for (let off = 0; off < cellW; off++) {
+    let score = 0;
+    for (let x = off; x < hDeriv.length; x += cellW) {
+      for (let dx = -3; dx <= 3; dx++) {
+        const idx = x + dx;
+        if (idx >= 0 && idx < hDeriv.length) score += hDeriv[idx]!;
+      }
+    }
+    if (score > bestHScore) { bestHScore = score; bestOffX = off; }
+  }
+
+  // Vertical projection derivative
+  const vProjOff: number[] = [];
+  for (let y = 0; y < height; y++) {
+    let sum = 0, count = 0;
+    for (let x = 0; x < width; x += 3) {
+      const [r] = getPixel(img, x, y);
+      sum += r; count++;
+    }
+    vProjOff.push(sum / count);
+  }
+  const vDeriv: number[] = [];
+  for (let i = 1; i < vProjOff.length; i++) {
+    vDeriv.push(Math.abs(vProjOff[i]! - vProjOff[i - 1]!));
+  }
+
+  let bestOffY = 0, bestVScore = 0;
+  for (let off = 0; off < cellH; off++) {
+    let score = 0;
+    for (let y = off; y < vDeriv.length; y += cellH) {
+      for (let dy = -3; dy <= 3; dy++) {
+        const idx = y + dy;
+        if (idx >= 0 && idx < vDeriv.length) score += vDeriv[idx]!;
+      }
+    }
+    if (score > bestVScore) { bestVScore = score; bestOffY = off; }
+  }
 
   // Step 3: With the best offset, find the rectangular extent of board cells.
-  // Classify each grid position and find the bounding box of board cells.
+  // Include partial cells before the offset (the board may extend to the edge).
+  // startCol/startRow can be negative (partial cell before offset).
+  const startCol = bestOffX > cellW * 0.3 ? -1 : 0;
+  const startRow = bestOffY > cellH * 0.3 ? -1 : 0;
   const maxCols = Math.floor((width - bestOffX) / cellW);
   const maxRows = Math.floor((height - bestOffY) / cellH);
 
-  const isBoard: boolean[][] = [];
-  for (let row = 0; row < maxRows; row++) {
-    const rowArr: boolean[] = [];
-    for (let col = 0; col < maxCols; col++) {
+  const isBoard = new Map<string, boolean>();
+  for (let row = startRow; row < maxRows; row++) {
+    for (let col = startCol; col < maxCols; col++) {
       const cx = bestOffX + col * cellW;
       const cy = bestOffY + row * cellH;
-      rowArr.push(looksLikeBoardCell(img, cx, cy, cellW, cellH));
+      isBoard.set(`${col},${row}`, looksLikeBoardCell(img, cx, cy, cellW, cellH));
     }
-    isBoard.push(rowArr);
   }
 
-  // Find the largest rectangular region of board cells
-  let minCol = maxCols, maxCol = 0, minRow = maxRows, maxRow = 0;
-  for (let row = 0; row < maxRows; row++) {
-    for (let col = 0; col < maxCols; col++) {
-      if (isBoard[row]![col]) {
+  // Find the bounding box of board cells
+  let minCol = maxCols, maxCol = startCol, minRow = maxRows, maxRow = startRow;
+  for (let row = startRow; row < maxRows; row++) {
+    for (let col = startCol; col < maxCols; col++) {
+      if (isBoard.get(`${col},${row}`)) {
         if (col < minCol) minCol = col;
         if (col > maxCol) maxCol = col;
         if (row < minRow) minRow = row;
@@ -741,20 +760,17 @@ function looksLikeBoardCell(img: ImageData, cx: number, cy: number, cellW: numbe
   return sampled > 4 && boardPixels / sampled > 0.6;
 }
 
-/** Find cell size via full-image R-channel derivative autocorrelation. */
+/** Find cell size via autocorrelation + derivative alignment validation. */
 function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
   const { width, height } = img;
 
-  // Horizontal projection: average R per column.
-  // Try both derivative and raw autocorrelation — pick the one that gives
-  // a stronger, more consistent result.
+  // Compute R-channel projections
   const hProj: number[] = [];
   for (let x = 0; x < width; x++) {
     let sum = 0, count = 0;
     for (let y = 0; y < height; y += 3) {
       const [r] = getPixel(img, x, y);
-      sum += r;
-      count++;
+      sum += r; count++;
     }
     hProj.push(sum / count);
   }
@@ -762,16 +778,13 @@ function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
   for (let i = 1; i < hProj.length; i++) {
     hDeriv.push(Math.abs(hProj[i]! - hProj[i - 1]!));
   }
-  const cellW = bestAutocorrelationPeak(hDeriv, 30, 300);
 
-  // Vertical projection: average R per row
   const vProj: number[] = [];
   for (let y = 0; y < height; y++) {
     let sum = 0, count = 0;
     for (let x = 0; x < width; x += 3) {
       const [r] = getPixel(img, x, y);
-      sum += r;
-      count++;
+      sum += r; count++;
     }
     vProj.push(sum / count);
   }
@@ -779,12 +792,128 @@ function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
   for (let i = 1; i < vProj.length; i++) {
     vDeriv.push(Math.abs(vProj[i]! - vProj[i - 1]!));
   }
-  const cellH = bestAutocorrelationPeak(vDeriv, 30, 300);
 
-  if (cellW && cellH) return { w: cellW, h: cellH };
-  if (cellW) return { w: cellW, h: cellW }; // assume square
-  if (cellH) return { w: cellH, h: cellH };
+  // Get candidate pitches from autocorrelation peaks
+  const hCandidates = topAutocorrelationPeaks(hDeriv, 30, 300, 5);
+  const vCandidates = topAutocorrelationPeaks(vDeriv, 30, 300, 5);
+
+  // Score each candidate using derivative alignment: the true pitch will
+  // have strong edges at regular intervals in the projection.
+  function derivAlignScore(deriv: number[], pitch: number): number {
+    let bestScore = 0;
+    for (let off = 0; off < pitch; off++) {
+      let score = 0;
+      for (let i = off; i < deriv.length; i += pitch) {
+        for (let d = -3; d <= 3; d++) {
+          const idx = i + d;
+          if (idx >= 0 && idx < deriv.length) score += deriv[idx]!;
+        }
+      }
+      if (score > bestScore) bestScore = score;
+    }
+    return bestScore;
+  }
+
+  // Pick the best pitch from candidates. Use derivative alignment to verify:
+  // for each candidate, check if a multiple (2x, 3x) has a higher per-line
+  // score, which would indicate the candidate is a sub-harmonic.
+  // Pick the best pitch. The autocorrelation's top candidate (candidates[0])
+  // is usually right, but may be a sub-harmonic. Use derivative alignment
+  // to check: if a candidate's 2x or 3x multiple is also a candidate AND
+  // has strong derivative alignment, the original is a sub-harmonic — use the multiple.
+  function bestPitchFromCandidates(deriv: number[], candidates: number[]): number | null {
+    if (candidates.length === 0) return null;
+
+    // Score all candidates with derivative alignment
+    const scored = candidates.map(p => ({ pitch: p, score: derivAlignScore(deriv, p) }));
+    scored.sort((a, b) => b.score - a.score);
+
+    // Start with the highest derivative score
+    let best = scored[0]!.pitch;
+
+    // Check if best is a sub-harmonic: if 2x or 3x of a smaller candidate
+    // is close to best and that candidate has decent deriv score too,
+    // prefer the smaller candidate (it's the fundamental).
+    for (const s of scored) {
+      if (s.pitch >= best) continue;
+      const ratio = best / s.pitch;
+      const nearInt = Math.round(ratio);
+      if (nearInt >= 2 && nearInt <= 4 && Math.abs(ratio - nearInt) < 0.1) {
+        // s.pitch is a potential fundamental. Check it has reasonable score.
+        if (s.score > scored[0]!.score * 0.5) {
+          best = s.pitch;
+          break;
+        }
+      }
+    }
+
+    return best;
+  }
+
+  const w = bestPitchFromCandidates(hDeriv, hCandidates);
+  const h = bestPitchFromCandidates(vDeriv, vCandidates);
+
+  // Clean One cells are roughly square. If the two dimensions disagree
+  // significantly, prefer the one that's close to the other's value or
+  // a clean multiple/divisor of it. If neither works, use the one with
+  // higher derivative alignment.
+  if (w && h) {
+    const ratio = Math.max(w, h) / Math.min(w, h);
+    if (ratio < 1.3) {
+      // Close enough — use as-is
+      return { w, h };
+    }
+    // They disagree. Check if one is a harmonic of the other.
+    const nearInt = Math.round(ratio);
+    if (nearInt >= 2 && Math.abs(ratio - nearInt) < 0.2) {
+      // One is a harmonic. Use the smaller value for both.
+      const smaller = Math.min(w, h);
+      return { w: smaller, h: smaller };
+    }
+    // Neither close nor harmonic — find a pitch that appears as a candidate
+    // in both dimensions (most likely to be the true cell size).
+    const vSet = new Set(vCandidates);
+    for (const c of hCandidates) {
+      if (vSet.has(c)) return { w: c, h: c };
+    }
+    // Fallback: use whichever dimension has a stronger autocorrelation signal
+    const wScore = derivAlignScore(hDeriv, w) + derivAlignScore(vDeriv, w);
+    const hScore = derivAlignScore(hDeriv, h) + derivAlignScore(vDeriv, h);
+    const best = wScore > hScore ? w : h;
+    return { w: best, h: best };
+  }
+  if (w) return { w, h: w };
+  if (h) return { w: h, h };
   return null;
+}
+
+/** Return the top N autocorrelation peaks (by cluster support). */
+function topAutocorrelationPeaks(signal: number[], minPeriod: number, maxPeriod: number, n: number): number[] {
+  const len = signal.length;
+  const mean = signal.reduce((a, b) => a + b, 0) / len;
+  const norm = signal.map((v) => v - mean);
+
+  let ac0 = 0;
+  for (const v of norm) ac0 += v * v;
+  if (ac0 === 0) return [];
+
+  const scores: number[] = [];
+  for (let lag = minPeriod; lag <= Math.min(maxPeriod, Math.floor(len / 2)); lag++) {
+    let ac = 0;
+    for (let i = 0; i < len - lag; i++) ac += norm[i]! * norm[i + lag]!;
+    scores.push(ac / ac0);
+  }
+
+  // Find local maxima
+  const peaks: { lag: number; score: number }[] = [];
+  for (let i = 1; i < scores.length - 1; i++) {
+    if (scores[i]! > scores[i - 1]! && scores[i]! > scores[i + 1]! && scores[i]! > 0.05) {
+      peaks.push({ lag: minPeriod + i, score: scores[i]! });
+    }
+  }
+
+  peaks.sort((a, b) => b.score - a.score);
+  return peaks.slice(0, n).map((p) => p.lag);
 }
 
 /** Find the strongest autocorrelation peak using cluster scoring. */
@@ -855,214 +984,122 @@ function bestAutocorrelationPeak(signal: number[], minPeriod: number, maxPeriod:
 // The cluster approach finds the densest group of bright pixels (the digit)
 // and normalizes that region to the template size using area-averaging.
 const CLEAN_ONE_TEMPLATES: { state: CellState; bitmap: string }[] = [
-  // "1" (170px) — serif + vertical stroke
+  // "1" — serif + vertical stroke
   { state: "1", bitmap:
     "0000000000000000" +
-    "0000000000111110" +
-    "0000000011111110" +
-    "0000001111111110" +
-    "0000111111111110" +
-    "0011111110011110" +
-    "0011110000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000001100"
-  },
-  // "1" (237px) — same shape, thicker strokes
-  { state: "1", bitmap:
-    "0000000000000000" +
-    "0000000000000000" +
-    "0000000000011110" +
-    "0000000000111110" +
-    "0000000001111110" +
-    "0000000011111110" +
-    "0000000111111110" +
-    "0000001111111110" +
-    "0000011111111110" +
-    "0000111111111110" +
-    "0001111111011110" +
-    "0001111110011110" +
-    "0011111100011110" +
-    "0111111000011110" +
-    "0011110000011110" +
-    "0011100000011110" +
-    "0001000000011110" +
-    "0000000000011110" +
-    "0000000000011110" +
-    "0000000000011110"
-  },
-  // "2" (170px) — top curve, sweeps down-left, bottom bar
-  { state: "2", bitmap:
-    "0000000000000000" +
-    "0000011111110000" +
-    "0000111111111000" +
-    "0001110000111100" +
-    "0011100000001100" +
-    "0011100000001110" +
-    "0011000000001110" +
-    "0000000000001110" +
-    "0000000000011100" +
-    "0000000000111100" +
-    "0000000001111000" +
-    "0000000011110000" +
-    "0000000111100000" +
-    "0000001111000000" +
-    "0000111110000000" +
-    "0001111000000000" +
-    "0011110000000000" +
-    "0111111111111110" +
-    "0111111111111110" +
-    "0000000000000000"
-  },
-  // "2" (237px) — same shape, thicker
-  { state: "2", bitmap:
-    "0000000000000000" +
-    "0000000000000000" +
-    "0000001111000000" +
-    "0000011111110000" +
-    "0000111111110000" +
-    "0001111111111000" +
-    "0001111111111100" +
-    "0011110000111100" +
-    "0011110000011100" +
-    "0011100000011110" +
-    "0011100000001110" +
-    "0111100000001110" +
-    "0111000000001110" +
-    "0111000000001110" +
-    "0111000000001110" +
-    "0000000000001110" +
-    "0000000000001110" +
-    "0000000000001110" +
-    "0000000000011110" +
-    "0000000000011100"
-  },
-  // "3" (170px) — top bar, middle curve, bottom curve
-  { state: "3", bitmap:
-    "0000000000000000" +
-    "0011111111111110" +
-    "0011111111111110" +
-    "0000000000111100" +
-    "0000000000111000" +
-    "0000000001110000" +
-    "0000000011100000" +
-    "0000000111000000" +
-    "0000001111000000" +
-    "0000011111111000" +
-    "0000011111111100" +
-    "0000000000011110" +
-    "0000000000001110" +
-    "0000000000000110" +
-    "0010000000000110" +
-    "0111000000001110" +
-    "0011100000011110" +
-    "0011111111111100" +
-    "0001111111111000" +
-    "0000000110000000"
-  },
-  // "3" (237px) — filled top half, narrowing bottom-right
-  { state: "3", bitmap:
-    "0000000000000000" +
-    "0011111111111100" +
-    "0111111111111110" +
-    "0111111111111110" +
-    "0111111111111110" +
-    "0111111111111110" +
-    "0011111111111110" +
-    "0000000000111100" +
-    "0000000000111100" +
-    "0000000001111000" +
-    "0000000001111000" +
-    "0000000011110000" +
-    "0000000011110000" +
-    "0000000111110000" +
-    "0000000111100000" +
-    "0000000111000000" +
-    "0000001111000000" +
-    "0000001110000000" +
-    "0000011111000000" +
-    "0000011111110000"
-  },
-  // "4" (170px) — ascending diagonal + crossbar
-  { state: "4", bitmap:
-    "0000000000000000" +
-    "0000000000111000" +
     "0000000001111000" +
     "0000000011111000" +
-    "0000000111111000" +
-    "0000000111111000" +
-    "0000001110111000" +
-    "0000011100111000" +
+    "0000001111111000" +
+    "0000011111111000" +
     "0000111100111000" +
     "0000111000111000" +
-    "0001110000111000" +
-    "0011100000111000" +
-    "0111100000111000" +
-    "0111111111111111" +
-    "0111111111111110" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
     "0000000000111000" +
     "0000000000111000" +
     "0000000000111000" +
     "0000000000111000" +
     "0000000000010000"
   },
-  // "4" (237px) — filled triangle
+  // "2" — top curve, sweeps down-left, bottom bar
+  { state: "2", bitmap:
+    "0000000000000000" +
+    "0000011111100000" +
+    "0000111111110000" +
+    "0001110000111000" +
+    "0011100000011100" +
+    "0011100000011100" +
+    "0011000000011100" +
+    "0000000000011100" +
+    "0000000000011100" +
+    "0000000000111000" +
+    "0000000001111000" +
+    "0000000011110000" +
+    "0000000111000000" +
+    "0000001110000000" +
+    "0000111100000000" +
+    "0001111000000000" +
+    "0011110000000000" +
+    "0011111111111100" +
+    "0011111111111100" +
+    "0000000000000000"
+  },
+  // "3" — top bar, middle curve, bottom curve
+  { state: "3", bitmap:
+    "0000000000000000" +
+    "0011111111111100" +
+    "0011111111111100" +
+    "0000000000111100" +
+    "0000000001111000" +
+    "0000000011110000" +
+    "0000000011100000" +
+    "0000000111000000" +
+    "0000001111000000" +
+    "0000011111110000" +
+    "0000011111111100" +
+    "0000000000011100" +
+    "0000000000001110" +
+    "0000000000001110" +
+    "0010000000001110" +
+    "0011000000001110" +
+    "0011100000011100" +
+    "0001111111111000" +
+    "0000111111110000" +
+    "0000000110000000"
+  },
+  // "4" — ascending diagonal + crossbar
   { state: "4", bitmap:
     "0000000000000000" +
-    "0000000000000000" +
-    "0000000000011100" +
-    "0000000000111110" +
-    "0000000000111110" +
-    "0000000001111110" +
-    "0000000001111110" +
-    "0000000011111110" +
-    "0000000011111110" +
-    "0000000111111110" +
-    "0000000111111110" +
-    "0000001111111110" +
-    "0000001111011110" +
-    "0000011111011110" +
-    "0000111110011110" +
-    "0000111110011110" +
-    "0001111100011110" +
-    "0001111100011110" +
-    "0011111000011110" +
-    "0011110000011110"
+    "0000000000111000" +
+    "0000000001111000" +
+    "0000000011111000" +
+    "0000000111111000" +
+    "0000001111111000" +
+    "0000001110111000" +
+    "0000011100111000" +
+    "0000111100111000" +
+    "0001111000111000" +
+    "0001110000111000" +
+    "0011100000111000" +
+    "0111101111111110" +
+    "0111111111111111" +
+    "0111111111111110" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000000000"
   },
-  // "5" (237px) — top bar, left stem, bottom curve
+  // "5" — top bar, LEFT stem, then bottom curve
   { state: "5", bitmap:
     "0000000000000000" +
     "0001111111111100" +
     "0001111111111100" +
     "0001110000000000" +
-    "0011100000000000" +
-    "0011100000000000" +
-    "0011100000000000" +
-    "0011111111100000" +
-    "0011111111111000" +
-    "0011111111111100" +
-    "0011100000011110" +
+    "0001100000000000" +
+    "0001100000000000" +
+    "0001100000000000" +
+    "0001111111100000" +
+    "0001111111111000" +
+    "0011111000111100" +
+    "0001100000011100" +
     "0000000000001110" +
-    "0000000000000110" +
-    "0000000000000110" +
-    "0111000000000110" +
-    "0111000000001110" +
-    "0011110000011110" +
-    "0001111111111100" +
-    "0000111111110000" +
+    "0000000000001110" +
+    "0000000000001110" +
+    "0011000000001110" +
+    "0011100000001100" +
+    "0011110000111100" +
+    "0001111111111000" +
+    "0000011111110000" +
     "0000000000000000"
   },
-  // "6" (standard shape)
+  // "6" — top curve left, bottom loop
   { state: "6", bitmap:
     "0000011111100000" +
     "0001111111110000" +
@@ -1085,7 +1122,7 @@ const CLEAN_ONE_TEMPLATES: { state: CellState; bitmap: string }[] = [
     "0000000000000000" +
     "0000000000000000"
   },
-  // "7" (top bar, diagonal down-left)
+  // "7" — top bar, diagonal down-left
   { state: "7", bitmap:
     "1111111111111110" +
     "1111111111111110" +
@@ -1108,7 +1145,7 @@ const CLEAN_ONE_TEMPLATES: { state: CellState; bitmap: string }[] = [
     "0011100000000000" +
     "0111000000000000"
   },
-  // "8" (two loops)
+  // "8" — two loops
   { state: "8", bitmap:
     "0000111111100000" +
     "0001111111110000" +
@@ -1335,9 +1372,30 @@ function classifyCleanOneCell(
     gMinY = Math.max(margin, gMinY - pad);
     gMaxY = Math.min(cellH - margin - 1, gMaxY + pad);
 
-    const gW = gMaxX - gMinX + 1;
-    const gH = gMaxY - gMinY + 1;
+    let gW = gMaxX - gMinX + 1;
+    let gH = gMaxY - gMinY + 1;
     if (gW < 3 || gH < 3) return "empty";
+
+    // Pad the bbox to match the template aspect ratio (TMPL_W:TMPL_H).
+    // This ensures consistent digit proportions regardless of the original
+    // bbox shape, so one template works at all cell sizes.
+    const targetRatio = TMPL_W / TMPL_H; // 0.8
+    const bboxRatio = gW / gH;
+    if (bboxRatio < targetRatio) {
+      // Too tall — widen
+      const newW = Math.round(gH * targetRatio);
+      const expand = newW - gW;
+      gMinX = Math.max(margin, gMinX - Math.floor(expand / 2));
+      gMaxX = Math.min(cellW - margin - 1, gMinX + newW - 1);
+      gW = gMaxX - gMinX + 1;
+    } else if (bboxRatio > targetRatio) {
+      // Too wide — heighten
+      const newH = Math.round(gW / targetRatio);
+      const expand = newH - gH;
+      gMinY = Math.max(margin, gMinY - Math.floor(expand / 2));
+      gMaxY = Math.min(cellH - margin - 1, gMinY + newH - 1);
+      gH = gMaxY - gMinY + 1;
+    }
 
     // Normalize the digit region to TMPL_W x TMPL_H using area-averaging
     const bitmap: number[] = new Array(TMPL_W * TMPL_H).fill(0);
@@ -1433,14 +1491,21 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
     let { colBorders, rowBorders } = grid;
     let { rows, cols } = grid;
 
-    // Trim edge rows/cols that have no confident cell classifications.
-    // A row with only "unknown" and "empty" at the edge is likely app UI.
-    // Real board rows have hidden cells, flags, or recognized numbers.
+    // Trim edge rows/cols that don't look like real board content.
+    // Real board rows have multiple confident cells (hidden, flags, numbers).
+    // Edge rows with mostly empty/unknown (plus maybe one stray detection)
+    // are likely app UI or header/footer.
     function isNonBoardRow(r: CellState[]): boolean {
-      return r.every((c) => c === "unknown" || c === "empty");
+      const confident = r.filter((c) => c !== "unknown" && c !== "empty").length;
+      // A real board row has at least 2 confident cells or >25% confident
+      return confident < 2 || confident / r.length < 0.25;
     }
     function isNonBoardCol(colIdx: number): boolean {
-      return board.every((r) => r[colIdx] === "unknown" || r[colIdx] === "empty");
+      const confident = board.filter((r) => {
+        const c = r[colIdx];
+        return c !== "unknown" && c !== "empty";
+      }).length;
+      return confident < 2 || confident / board.length < 0.25;
     }
 
     // Trim top rows
