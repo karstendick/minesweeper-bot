@@ -1208,27 +1208,27 @@ const CLEAN_ONE_TEMPLATES: { state: CellState; bitmap: string }[] = [
     "0000011111110000" +
     "0000000000000000"
   },
-  // "6" — top curve left, bottom loop
+  // "6" — descending top curve, bottom loop
   { state: "6", bitmap:
-    "0000011111100000" +
-    "0001111111110000" +
-    "0011111000000000" +
-    "0111110000000000" +
-    "0111100000000000" +
-    "0111100000000000" +
-    "0111111111110000" +
-    "0111111111111000" +
-    "0111110000011100" +
-    "0111100000001110" +
-    "0111100000001110" +
-    "0111100000001110" +
-    "0111100000001110" +
-    "0011110000011100" +
+    "0000000000000000" +
+    "0000000111000000" +
+    "0000000111000000" +
+    "0000001110000000" +
+    "0000011100000000" +
+    "0000111000000000" +
+    "0000111000000000" +
+    "0001111111100000" +
     "0001111111111000" +
-    "0000111111110000" +
-    "0000000000000000" +
-    "0000000000000000" +
-    "0000000000000000" +
+    "0011110000111000" +
+    "0011000000011100" +
+    "0111000000001100" +
+    "0111000000001100" +
+    "0111000000001100" +
+    "0111000000001100" +
+    "0111000000011100" +
+    "0011110000111000" +
+    "0001111111110000" +
+    "0000011111100000" +
     "0000000000000000"
   },
   // "7" — top bar, diagonal down-left
@@ -1607,22 +1607,25 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
     function isNonBoardRow(r: CellState[]): boolean {
       const hidden = r.filter((c) => c === "hidden").length;
       const flags = r.filter((c) => c === "flag").length;
+      const numbers = r.filter((c) => c >= "1" && c <= "8").length;
       // Keep row if it has any hidden cells
       if (hidden > 0) return false;
       // Trim rows dominated by flags (>40%) — likely UI with false flag detections
       if (flags > r.length * 0.4) return true;
-      // Keep rows with real content (numbers, non-trivial mix)
-      const confident = r.filter((c) => c !== "unknown" && c !== "empty").length;
-      return confident < 2;
+      // Rows without hidden cells need substantial content to be kept.
+      // Real revealed rows have many numbers; UI rows have a few scattered false positives.
+      const confident = flags + numbers;
+      return confident < r.length * 0.2;
     }
     function isNonBoardCol(colIdx: number): boolean {
       const colCells = board.map((r) => r[colIdx]!);
       const hidden = colCells.filter((c) => c === "hidden").length;
       const flags = colCells.filter((c) => c === "flag").length;
+      const numbers = colCells.filter((c) => c >= "1" && c <= "8").length;
       if (hidden > 0) return false;
       if (flags > colCells.length * 0.4) return true;
-      const confident = colCells.filter((c) => c !== "unknown" && c !== "empty").length;
-      return confident < 2;
+      const confident = flags + numbers;
+      return confident < colCells.length * 0.2;
     }
 
     // Trim top rows
