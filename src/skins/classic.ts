@@ -46,7 +46,7 @@ export function detectClassicGrid(img: ImageData): {
   // Scan multiple horizontal rows for 128-gray border pixels and merge results.
   // A single row can miss borders where number text interrupts the border pixel.
   const hBorderSet = new Set<number>();
-  const scanYs = [0.25, 0.4, 0.5, 0.6, 0.75].map((f) => Math.floor(height * f));
+  const scanYs = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].map((f) => Math.floor(height * f));
 
   for (const scanY of scanYs) {
     for (let x = 0; x < width; x++) {
