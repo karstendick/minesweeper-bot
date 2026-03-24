@@ -11,16 +11,11 @@ import { join } from "node:path";
 import { describe, test, expect } from "vitest";
 import { detectBoard, type CellState } from "../vision.js";
 
-import { existsSync } from "node:fs";
-
-const ROOT = join(import.meta.dirname, "..", "..");
-const TEST_IMAGES_DIR = join(ROOT, "data", "test-images");
-const IMAGES_DIR = join(ROOT, "data", "images");
-const GT_DIR = join(ROOT, "data", "ground-truth");
+const FIXTURES = join(import.meta.dirname, "fixtures");
+const IMAGES_DIR = join(FIXTURES, "images");
+const GT_DIR = join(FIXTURES, "ground-truth");
 
 function imagePath(name: string): string {
-  const testPath = join(TEST_IMAGES_DIR, name);
-  if (existsSync(testPath)) return testPath;
   return join(IMAGES_DIR, name);
 }
 
