@@ -1,5 +1,8 @@
-# Cached data
+# Cached data (bulk image downloads, skin lists, debug output)
 data/
+# But keep ground truth and test fixture images
+!data/ground-truth/
+!data/test-images/
 
 # Logs
 logs
