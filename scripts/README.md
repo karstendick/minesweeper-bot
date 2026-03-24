@@ -16,9 +16,9 @@
 
 ## Testing & Verification
 
-- **test-vision.ts** — Run vision pipeline against all images, report aggregate stats
+- **scan-all-images.ts** — Run vision pipeline against all images, report aggregate stats
   ```
-  npx tsx scripts/test-vision.ts [--limit 10] [--verbose]
+  npx tsx scripts/scan-all-images.ts [--limit 10] [--verbose]
   ```
 
 - **check-grid.ts** — Show detected grid as 2D character array for manual verification
