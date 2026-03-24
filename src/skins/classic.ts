@@ -296,22 +296,28 @@ export function classifyClassicCell(
 
   if (innerSize <= 0) return "unknown";
 
-  // Hidden/flag detection: scan for white bevel strip
-  let maxWhiteInRow = 0;
-  for (let dy = 2; dy < Math.min(8, cellSize); dy++) {
-    let whites = 0;
+  // Hidden/flag detection: scan for bright bevel strip at the top of the cell.
+  // Normal hidden cells have white (255) bevel pixels. Green-highlighted "safe"
+  // cells have bright green-tinted bevel pixels. Both indicate hidden state.
+  let maxBrightInRow = 0;
+  const bevelEnd = Math.min(Math.floor(cellSize * 0.2), cellSize);
+  for (let dy = 2; dy < bevelEnd; dy++) {
+    let brights = 0;
     const y = cellY + dy;
     if (y >= img.height) continue;
     for (let dx = 2; dx < cellSize - 2; dx++) {
       const x = cellX + dx;
       if (x >= img.width) continue;
       const [r, g, b] = getPixel(img, x, y);
-      if (isWhite(r, g, b)) whites++;
+      // White bevel OR bright tinted bevel (any channel >= 240, all >= 180)
+      if (isWhite(r, g, b) || (Math.max(r, g, b) >= 240 && Math.min(r, g, b) >= 180)) {
+        brights++;
+      }
     }
-    if (whites > maxWhiteInRow) maxWhiteInRow = whites;
+    if (brights > maxBrightInRow) maxBrightInRow = brights;
   }
 
-  const isHiddenBevel = maxWhiteInRow > cellSize / 3;
+  const isHiddenBevel = maxBrightInRow > cellSize / 3;
 
   if (isHiddenBevel) {
     let redPixels = 0;
