@@ -623,8 +623,11 @@ function detectCleanOneGrid(img: ImageData): {
   const cellSize = findCleanOneCellSize(img);
   if (!cellSize) return null;
 
-  const cellW = cellSize.w;
-  const cellH = cellSize.h;
+  // Refine the pitch by finding the value that best aligns actual
+  // orange↔dark cell boundary transitions.
+  const refinedSize = refineCellSize(img, cellSize.w, cellSize.h);
+  const cellW = refinedSize.w;
+  const cellH = refinedSize.h;
 
   // Step 2: Slide a cell-sized window across the image and classify each
   // position. A cell is "board" if it looks like hidden (orange) or
@@ -635,59 +638,97 @@ function detectCleanOneGrid(img: ImageData): {
   // positions. The R-channel projection has edges at cell boundaries —
   // the offset where these edges align with the pitch gives the true grid.
 
-  // Horizontal projection derivative
-  const hProj: number[] = [];
+  // Find the grid offset using derivative alignment.
+  // Restrict projections to the middle 60% of the image to avoid UI ribbons
+  // at the top/bottom which can shift the offset.
+  const yStart = Math.floor(height * 0.2);
+  const yEnd = Math.floor(height * 0.8);
+  const xStart = Math.floor(width * 0.1);
+  const xEnd = Math.floor(width * 0.9);
+
+  // Horizontal projection (average R per column, restricted Y range)
+  const hProjOff: number[] = [];
   for (let x = 0; x < width; x++) {
     let sum = 0, count = 0;
-    for (let y = 0; y < height; y += 3) {
+    for (let y = yStart; y < yEnd; y += 3) {
       const [r] = getPixel(img, x, y);
       sum += r; count++;
     }
-    hProj.push(sum / count);
+    hProjOff.push(count > 0 ? sum / count : 0);
   }
-  const hDeriv: number[] = [];
-  for (let i = 1; i < hProj.length; i++) {
-    hDeriv.push(Math.abs(hProj[i]! - hProj[i - 1]!));
+  const hDerivOff: number[] = [];
+  for (let i = 1; i < hProjOff.length; i++) {
+    hDerivOff.push(Math.abs(hProjOff[i]! - hProjOff[i - 1]!));
   }
 
-  // Find best horizontal offset: sum derivative at grid line positions
   let bestOffX = 0, bestHScore = 0;
   for (let off = 0; off < cellW; off++) {
     let score = 0;
-    for (let x = off; x < hDeriv.length; x += cellW) {
+    for (let x = off; x < hDerivOff.length; x += cellW) {
       for (let dx = -3; dx <= 3; dx++) {
         const idx = x + dx;
-        if (idx >= 0 && idx < hDeriv.length) score += hDeriv[idx]!;
+        if (idx >= 0 && idx < hDerivOff.length) score += hDerivOff[idx]!;
       }
     }
     if (score > bestHScore) { bestHScore = score; bestOffX = off; }
   }
 
-  // Vertical projection derivative
+  // Vertical projection (average R per row, restricted to middle of image
+  // both horizontally AND vertically to avoid UI edges)
+  const vYStart = Math.floor(height * 0.3);
+  const vYEnd = Math.floor(height * 0.7);
   const vProjOff: number[] = [];
   for (let y = 0; y < height; y++) {
     let sum = 0, count = 0;
-    for (let x = 0; x < width; x += 3) {
+    for (let x = xStart; x < xEnd; x += 3) {
       const [r] = getPixel(img, x, y);
       sum += r; count++;
     }
-    vProjOff.push(sum / count);
+    vProjOff.push(count > 0 ? sum / count : 0);
   }
-  const vDeriv: number[] = [];
+  const vDerivOff: number[] = [];
   for (let i = 1; i < vProjOff.length; i++) {
-    vDeriv.push(Math.abs(vProjOff[i]! - vProjOff[i - 1]!));
+    vDerivOff.push(Math.abs(vProjOff[i]! - vProjOff[i - 1]!));
   }
 
+  // For the vertical offset, find orange↔dark transitions by scanning
+  // individual columns (not the averaged projection). These per-column
+  // transitions are more precise than the averaged derivative.
+  const transitionYs: number[] = [];
+  for (let x = xStart; x < xEnd; x += Math.max(1, Math.floor((xEnd - xStart) / 20))) {
+    let prevIsOrange = false;
+    for (let y = 1; y < height; y++) {
+      const [r, g, b] = getPixel(img, x, y);
+      const isOrange = isCleanOneOrange(r, g, b);
+      const isDark = isCleanOneDark(r, g, b);
+      if ((prevIsOrange && isDark) || (!prevIsOrange && isOrange && isDark === false)) {
+        // Transition between orange and dark
+        if (y > vYStart && y < vYEnd) transitionYs.push(y);
+      }
+      if (isOrange) prevIsOrange = true;
+      else if (isDark) prevIsOrange = false;
+    }
+  }
+
+  // Score each vertical offset by how many transitions align to grid lines
   let bestOffY = 0, bestVScore = 0;
   for (let off = 0; off < cellH; off++) {
     let score = 0;
-    for (let y = off; y < vDeriv.length; y += cellH) {
+    for (const ty of transitionYs) {
+      const nearestLine = Math.round((ty - off) / cellH) * cellH + off;
+      if (Math.abs(ty - nearestLine) <= 3) score++;
+    }
+    // Also add derivative score for tiebreaking
+    let derivScore = 0;
+    for (let y = off; y < vDerivOff.length; y += cellH) {
+      if (y < vYStart || y > vYEnd) continue;
       for (let dy = -3; dy <= 3; dy++) {
         const idx = y + dy;
-        if (idx >= 0 && idx < vDeriv.length) score += vDeriv[idx]!;
+        if (idx >= 0 && idx < vDerivOff.length) derivScore += vDerivOff[idx]!;
       }
     }
-    if (score > bestVScore) { bestVScore = score; bestOffY = off; }
+    const combined = score * 100 + derivScore;
+    if (combined > bestVScore) { bestVScore = combined; bestOffY = off; }
   }
 
   // Step 3: With the best offset, find the rectangular extent of board cells.
@@ -758,6 +799,73 @@ function looksLikeBoardCell(img: ImageData, cx: number, cy: number, cellW: numbe
   }
 
   return sampled > 4 && boardPixels / sampled > 0.6;
+}
+
+/** Refine cell pitch by sweeping ±3px and maximizing orange↔dark cell boundary alignment. */
+function refineCellSize(img: ImageData, approxW: number, approxH: number): { w: number; h: number } {
+  const { width, height } = img;
+
+  // Collect genuine orange↔dark cell boundary positions.
+  // Track runs of orange/dark pixels; a boundary occurs when switching
+  // between types after a sustained run. "Other" pixels (glyph content,
+  // separators) don't reset the run — they're ignored.
+  function collectBoundaries(scanHorizontal: boolean): number[] {
+    const boundaries: number[] = [];
+    const outerStart = scanHorizontal ? Math.floor(height * 0.2) : Math.floor(width * 0.1);
+    const outerEnd = scanHorizontal ? Math.floor(height * 0.8) : Math.floor(width * 0.9);
+    const innerMax = scanHorizontal ? width : height;
+    const step = Math.max(1, Math.floor((outerEnd - outerStart) / 20));
+    const runMin = 3;
+
+    for (let outer = outerStart; outer < outerEnd; outer += step) {
+      let orangeRun = 0, darkRun = 0;
+      for (let inner = 0; inner < innerMax; inner++) {
+        const x = scanHorizontal ? inner : outer;
+        const y = scanHorizontal ? outer : inner;
+        const [r, g, b] = getPixel(img, x, y);
+
+        if (isCleanOneOrange(r, g, b)) {
+          if (darkRun >= runMin) boundaries.push(inner);
+          orangeRun++;
+          darkRun = 0;
+        } else if (isCleanOneDark(r, g, b)) {
+          if (orangeRun >= runMin) boundaries.push(inner);
+          darkRun++;
+          orangeRun = 0;
+        }
+        // Don't reset on "other" pixels — allow small gaps from separators
+      }
+    }
+    return boundaries;
+  }
+
+  function bestPitch(boundaries: number[], approx: number): number {
+    let bestP = approx, bestScore = 0;
+    for (let p = approx - 3; p <= approx + 3; p++) {
+      // Find best offset for this pitch
+      let bestOffScore = 0;
+      for (let off = 0; off < p; off++) {
+        let score = 0;
+        for (const t of boundaries) {
+          const nearest = Math.round((t - off) / p) * p + off;
+          if (Math.abs(t - nearest) <= 3) score++;
+        }
+        if (score > bestOffScore) bestOffScore = score;
+      }
+      if (bestOffScore > bestScore) { bestScore = bestOffScore; bestP = p; }
+    }
+    return bestP;
+  }
+
+  // Horizontal scan finds vertical cell boundaries (columns)
+  const hBoundaries = collectBoundaries(true);
+  // Vertical scan finds horizontal cell boundaries (rows)
+  const vBoundaries = collectBoundaries(false);
+
+  const w = hBoundaries.length > 5 ? bestPitch(hBoundaries, approxW) : approxW;
+  const h = vBoundaries.length > 5 ? bestPitch(vBoundaries, approxH) : approxH;
+
+  return { w, h };
 }
 
 /** Find cell size via autocorrelation + derivative alignment validation. */
@@ -831,16 +939,17 @@ function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
     // Start with the highest derivative score
     let best = scored[0]!.pitch;
 
-    // Check if best is a sub-harmonic: if 2x or 3x of a smaller candidate
-    // is close to best and that candidate has decent deriv score too,
-    // prefer the smaller candidate (it's the fundamental).
+    // Check if best is a sub-harmonic by seeing if a LARGER candidate is
+    // a clean multiple of best. Sub-harmonics score high because every real
+    // grid edge is also at sub-harmonic intervals.
     for (const s of scored) {
-      if (s.pitch >= best) continue;
-      const ratio = best / s.pitch;
+      if (s.pitch <= best) continue;
+      const ratio = s.pitch / best;
       const nearInt = Math.round(ratio);
-      if (nearInt >= 2 && nearInt <= 4 && Math.abs(ratio - nearInt) < 0.1) {
-        // s.pitch is a potential fundamental. Check it has reasonable score.
-        if (s.score > scored[0]!.score * 0.5) {
+      if (nearInt >= 2 && nearInt <= 5 && Math.abs(ratio - nearInt) < 0.15) {
+        // s.pitch is a potential true pitch. If it has reasonable score,
+        // prefer it (it's the fundamental, best was a sub-harmonic).
+        if (s.score > scored[0]!.score * 0.6) {
           best = s.pitch;
           break;
         }
@@ -850,17 +959,17 @@ function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
     return best;
   }
 
-  const w = bestPitchFromCandidates(hDeriv, hCandidates);
-  const h = bestPitchFromCandidates(vDeriv, vCandidates);
+  // Test all candidates from both dimensions against both derivatives.
+  // This finds the pitch that works well in both directions.
+  const allCandidates = [...new Set([...hCandidates, ...vCandidates])];
+  const w = bestPitchFromCandidates(hDeriv, allCandidates);
+  const h = bestPitchFromCandidates(vDeriv, allCandidates);
 
-  // Clean One cells are roughly square. If the two dimensions disagree
-  // significantly, prefer the one that's close to the other's value or
-  // a clean multiple/divisor of it. If neither works, use the one with
-  // higher derivative alignment.
+  // Clean One cells are roughly square.
   if (w && h) {
     const ratio = Math.max(w, h) / Math.min(w, h);
-    if (ratio < 1.3) {
-      // Close enough — use as-is
+    if (ratio < 1.08) {
+      // Very close — use as-is
       return { w, h };
     }
     // They disagree. Check if one is a harmonic of the other.
@@ -1496,16 +1605,24 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
     // Edge rows with mostly empty/unknown (plus maybe one stray detection)
     // are likely app UI or header/footer.
     function isNonBoardRow(r: CellState[]): boolean {
+      const hidden = r.filter((c) => c === "hidden").length;
+      const flags = r.filter((c) => c === "flag").length;
+      // Keep row if it has any hidden cells
+      if (hidden > 0) return false;
+      // Trim rows dominated by flags (>40%) — likely UI with false flag detections
+      if (flags > r.length * 0.4) return true;
+      // Keep rows with real content (numbers, non-trivial mix)
       const confident = r.filter((c) => c !== "unknown" && c !== "empty").length;
-      // A real board row has at least 2 confident cells or >25% confident
-      return confident < 2 || confident / r.length < 0.25;
+      return confident < 2;
     }
     function isNonBoardCol(colIdx: number): boolean {
-      const confident = board.filter((r) => {
-        const c = r[colIdx];
-        return c !== "unknown" && c !== "empty";
-      }).length;
-      return confident < 2 || confident / board.length < 0.25;
+      const colCells = board.map((r) => r[colIdx]!);
+      const hidden = colCells.filter((c) => c === "hidden").length;
+      const flags = colCells.filter((c) => c === "flag").length;
+      if (hidden > 0) return false;
+      if (flags > colCells.length * 0.4) return true;
+      const confident = colCells.filter((c) => c !== "unknown" && c !== "empty").length;
+      return confident < 2;
     }
 
     // Trim top rows
