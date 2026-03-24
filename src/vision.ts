@@ -7,9 +7,6 @@
 
 import sharp from "sharp";
 
-// OpenCV is no longer needed for the classic skin pipeline,
-// but we keep the cvReady export for API compatibility.
-export const cvReady: Promise<void> = Promise.resolve();
 
 export type CellState =
   | "hidden"
@@ -1536,7 +1533,6 @@ function classifyCleanOneCell(
 // --- Main entry point ---
 
 export async function detectBoard(imagePath: string): Promise<BoardDetectionResult | null> {
-  await cvReady;
   const img = await loadImageRaw(imagePath);
 
   const skin = detectSkin(img);
