@@ -8,6 +8,8 @@
 import { join } from "node:path";
 import sharp from "sharp";
 import { detectBoard } from "../src/vision.js";
+import { extractDigitBitmap } from "../src/skins/clean-one.js";
+import { TMPL_W, TMPL_H } from "../src/skins/clean-one-templates.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const filename = process.argv[2] ?? "1jhbi9c.jpeg";
@@ -24,8 +26,6 @@ function getGray(x: number, y: number): number {
   return (data[idx]! + data[idx + 1]! + data[idx + 2]!) / 3;
 }
 
-const TMPL_W = 16, TMPL_H = 20;
-
 for (const assignment of assignments) {
   const [posStr, digit] = assignment.split("=");
   const [colStr, rowStr] = posStr!.split(",");
@@ -36,9 +36,9 @@ for (const assignment of assignments) {
   const cellY = result.rowBorders[row]!;
   const cellW = result.colBorders[col + 1]! - cellX;
   const cellH = result.rowBorders[row + 1]! - cellY;
-  const margin = Math.floor(Math.min(cellW, cellH) * 0.08);
 
-  // Threshold
+  // Compute threshold (same as classifyCleanOneCell)
+  const margin = Math.floor(Math.min(cellW, cellH) * 0.08);
   let bgSum = 0, bgCnt = 0;
   for (let dy = margin; dy < cellH - margin; dy += 5) {
     for (let dx = margin; dx < cellW - margin; dx += 5) {
@@ -48,102 +48,32 @@ for (const assignment of assignments) {
       if (g < 100) { bgSum += g; bgCnt++; }
     }
   }
-  const bgLvl = bgCnt > 0 ? bgSum / bgCnt : 51;
-  const thresh = bgLvl + (220 - bgLvl) * 0.5;
+  const thresh = (bgCnt > 0 ? bgSum / bgCnt : 51) + (220 - (bgCnt > 0 ? bgSum / bgCnt : 51)) * 0.5;
 
-  // Collect bright pixels
-  const brightPts: { x: number; y: number }[] = [];
-  for (let dy = margin; dy < cellH - margin; dy += 2) {
-    for (let dx = margin; dx < cellW - margin; dx += 2) {
-      const x = cellX + dx, y = cellY + dy;
-      if (x >= info.width || y >= info.height) continue;
-      if (getGray(x, y) > thresh) brightPts.push({ x: dx, y: dy });
-    }
-  }
+  const bitmap = extractDigitBitmap(
+    { data, width: info.width, height: info.height },
+    cellX, cellY, cellW, cellH, thresh,
+  );
 
-  if (brightPts.length < 3) {
-    console.log(`\n"${digit}" at (${col},${row}): only ${brightPts.length} bright pts, skipping`);
+  if (!bitmap) {
+    console.log(`\n"${digit}" at (${col},${row}): no digit found, skipping`);
     continue;
   }
 
-  // Cluster: median → iterative centroid
-  const maxRadius = Math.floor(Math.min(cellW, cellH) * 0.25);
-  let cx = brightPts.map(p => p.x).sort((a, b) => a - b)[Math.floor(brightPts.length / 2)]!;
-  let cy = brightPts.map(p => p.y).sort((a, b) => a - b)[Math.floor(brightPts.length / 2)]!;
-
-  for (let iter = 0; iter < 3; iter++) {
-    const nearby = brightPts.filter(p => Math.abs(p.x - cx) < maxRadius && Math.abs(p.y - cy) < maxRadius);
-    if (nearby.length === 0) break;
-    cx = Math.round(nearby.reduce((s, p) => s + p.x, 0) / nearby.length);
-    cy = Math.round(nearby.reduce((s, p) => s + p.y, 0) / nearby.length);
-  }
-
-  const cluster = brightPts.filter(p => Math.abs(p.x - cx) < maxRadius && Math.abs(p.y - cy) < maxRadius);
-  if (cluster.length < 3) {
-    console.log(`\n"${digit}" at (${col},${row}): cluster too small (${cluster.length})`);
-    continue;
-  }
-
-  let gMinX = cellW, gMaxX = 0, gMinY = cellH, gMaxY = 0;
-  for (const p of cluster) {
-    if (p.x < gMinX) gMinX = p.x;
-    if (p.x > gMaxX) gMaxX = p.x;
-    if (p.y < gMinY) gMinY = p.y;
-    if (p.y > gMaxY) gMaxY = p.y;
-  }
-
-  const pad = Math.max(2, Math.floor(Math.min(cellW, cellH) * 0.02));
-  gMinX = Math.max(margin, gMinX - pad);
-  gMaxX = Math.min(cellW - margin - 1, gMaxX + pad);
-  gMinY = Math.max(margin, gMinY - pad);
-  gMaxY = Math.min(cellH - margin - 1, gMaxY + pad);
-  let gW = gMaxX - gMinX + 1;
-  let gH = gMaxY - gMinY + 1;
-
-  // Pad bbox to match template aspect ratio (TMPL_W:TMPL_H = 16:20 = 0.8)
-  const targetRatio = TMPL_W / TMPL_H;
-  const bboxRatio = gW / gH;
-  if (bboxRatio < targetRatio) {
-    const newW = Math.round(gH * targetRatio);
-    const expand = newW - gW;
-    gMinX = Math.max(margin, gMinX - Math.floor(expand / 2));
-    gMaxX = Math.min(cellW - margin - 1, gMinX + newW - 1);
-    gW = gMaxX - gMinX + 1;
-  } else if (bboxRatio > targetRatio) {
-    const newH = Math.round(gW / targetRatio);
-    const expand = newH - gH;
-    gMinY = Math.max(margin, gMinY - Math.floor(expand / 2));
-    gMaxY = Math.min(cellH - margin - 1, gMinY + newH - 1);
-    gH = gMaxY - gMinY + 1;
-  }
-
-  console.log(`\n// "${digit}" from (${col},${row}) cell=${cellW}x${cellH} bbox=${gW}x${gH} cluster=${cluster.length} thresh=${thresh.toFixed(0)}`);
-
+  // Format as template code
   const bits: string[] = [];
   let fill = 0;
   for (let ty = 0; ty < TMPL_H; ty++) {
     let row16 = "";
     for (let tx = 0; tx < TMPL_W; tx++) {
-      const x0 = cellX + gMinX + Math.floor(tx * gW / TMPL_W);
-      const x1 = cellX + gMinX + Math.floor((tx + 1) * gW / TMPL_W);
-      const y0 = cellY + gMinY + Math.floor(ty * gH / TMPL_H);
-      const y1 = cellY + gMinY + Math.floor((ty + 1) * gH / TMPL_H);
-      let sum = 0, count = 0;
-      for (let y = y0; y < y1; y++) {
-        for (let x = x0; x < x1; x++) {
-          if (x >= 0 && x < info.width && y >= 0 && y < info.height) {
-            sum += getGray(x, y);
-            count++;
-          }
-        }
-      }
-      const val = (count > 0 && sum / count > thresh) ? "1" : "0";
+      const val = bitmap[ty * TMPL_W + tx] ? "1" : "0";
       row16 += val;
       if (val === "1") fill++;
     }
     bits.push(row16);
   }
 
+  console.log(`\n// "${digit}" from (${col},${row}) cell=${cellW}x${cellH} fill=${fill}/${TMPL_W * TMPL_H} thresh=${thresh.toFixed(0)}`);
   for (const b of bits) {
     console.log("//  " + b.replace(/0/g, " ").replace(/1/g, "█"));
   }
