@@ -80,7 +80,7 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
     const grid = detectClassicGrid(img);
     if (!grid) return null;
 
-    const board: CellState[][] = [];
+    let board: CellState[][] = [];
     for (let row = 0; row < grid.rows; row++) {
       const rowCells: CellState[] = [];
       const cellY = grid.rowBorders[row]!;
@@ -94,19 +94,36 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
       board.push(rowCells);
     }
 
-    const x = grid.colBorders[0]!;
-    const y = grid.rowBorders[0]!;
-    const w = grid.colBorders[grid.cols]! - x;
-    const h = grid.rowBorders[grid.rows]! - y;
+    // Trim edge rows that are frame/header — they contain only hidden+empty
+    // (real board rows have numbers, flags, or a mix of states)
+    let { colBorders, rowBorders } = grid;
+    let { rows, cols } = grid;
+
+    function isFrameRow(r: CellState[]): boolean {
+      return r.every((c) => c === "hidden" || c === "empty");
+    }
+    while (rows > 0 && isFrameRow(board[0]!)) {
+      board.shift(); rowBorders = rowBorders.slice(1); rows--;
+    }
+    while (rows > 0 && isFrameRow(board[rows - 1]!)) {
+      board.pop(); rowBorders = rowBorders.slice(0, -1); rows--;
+    }
+
+    if (rows < 3 || cols < 3) return null;
+
+    const x = colBorders[0]!;
+    const y = rowBorders[0]!;
+    const w = colBorders[cols]! - x;
+    const h = rowBorders[rows]! - y;
 
     return {
       board,
       gridBounds: { x, y, width: w, height: h },
       cellSize: { width: grid.cellSize, height: grid.cellSize },
-      colBorders: grid.colBorders,
-      rowBorders: grid.rowBorders,
-      rows: grid.rows,
-      cols: grid.cols,
+      colBorders,
+      rowBorders,
+      rows,
+      cols,
       skin: "classic",
     };
   }

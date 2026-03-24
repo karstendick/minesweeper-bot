@@ -43,25 +43,36 @@ export function detectClassicGrid(img: ImageData): {
 } | null {
   const { width, height } = img;
 
-  const scanY = Math.floor(height / 2);
-  const borderPositions: number[] = [];
+  // Scan multiple horizontal rows for 128-gray border pixels and merge results.
+  // A single row can miss borders where number text interrupts the border pixel.
+  const hBorderSet = new Set<number>();
+  const scanYs = [0.25, 0.4, 0.5, 0.6, 0.75].map((f) => Math.floor(height * f));
 
-  for (let x = 0; x < width; x++) {
-    const [r, g, b] = getPixel(img, x, scanY);
-    if (isBorderGray(r, g, b)) {
-      borderPositions.push(x);
+  for (const scanY of scanYs) {
+    for (let x = 0; x < width; x++) {
+      const [r, g, b] = getPixel(img, x, scanY);
+      if (isBorderGray(r, g, b)) {
+        hBorderSet.add(x);
+      }
     }
   }
 
-  // Cluster consecutive border pixels (borders can be 1-3px wide)
+  // Cluster consecutive border pixels (borders can be 1-3px wide).
+  // Use the center of each cluster for more stable positioning.
   const borderLines: number[] = [];
-  let clusterStart = -10;
-  for (const pos of borderPositions) {
-    if (pos - clusterStart > 3) {
-      borderLines.push(pos);
+  const sortedHBorders = [...hBorderSet].sort((a, b) => a - b);
+  let clusterStartPos = -10;
+  let clusterSum = 0, clusterCount = 0;
+  for (const pos of sortedHBorders) {
+    if (pos - clusterStartPos > 3) {
+      if (clusterCount > 0) borderLines.push(Math.round(clusterSum / clusterCount));
+      clusterSum = pos; clusterCount = 1;
+    } else {
+      clusterSum += pos; clusterCount++;
     }
-    clusterStart = pos;
+    clusterStartPos = pos;
   }
+  if (clusterCount > 0) borderLines.push(Math.round(clusterSum / clusterCount));
 
   if (borderLines.length < 4) return null;
 
@@ -106,12 +117,12 @@ export function detectClassicGrid(img: ImageData): {
 
   const vBorderLines: number[] = [];
   const sortedVBorders = [...vBorderSet].sort((a, b) => a - b);
-  clusterStart = -10;
+  let vClusterStart = -10;
   for (const pos of sortedVBorders) {
-    if (pos - clusterStart > 3) {
+    if (pos - vClusterStart > 3) {
       vBorderLines.push(pos);
     }
-    clusterStart = pos;
+    vClusterStart = pos;
   }
 
   const gridRows = findGridLines(vBorderLines, cellSize);

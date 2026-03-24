@@ -14,6 +14,13 @@
   npx tsx scripts/find-by-skin.ts --skin classic  # list images matching a specific skin
   ```
 
+## Review
+
+- **review-image.ts** — Run grid detection, print results, generate visualization, and open both images
+  ```
+  npx tsx scripts/review-image.ts <image-file>
+  ```
+
 ## Testing & Verification
 
 - **scan-all-images.ts** — Run vision pipeline against all images, report aggregate stats
