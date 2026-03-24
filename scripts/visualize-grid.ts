@@ -8,7 +8,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import sharp from "sharp";
-import { detectBoard } from "../src/vision.js";
+import { detectBoard, cellStateToChar } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const OUT_DIR = join(import.meta.dirname, "..", "data", "debug");
@@ -53,16 +53,10 @@ for (const y of result.rowBorders) {
 }
 
 // Label each cell
-const charMap: Record<string, string> = {
-  hidden: ".", empty: " ", flag: "F", mine: "*", unknown: "?",
-  "1": "1", "2": "2", "3": "3", "4": "4",
-  "5": "5", "6": "6", "7": "7", "8": "8",
-};
-
 for (let row = 0; row < result.rows; row++) {
   for (let col = 0; col < result.cols; col++) {
     const state = result.board[row]![col]!;
-    const label = charMap[state] ?? "?";
+    const label = cellStateToChar[state] ?? "?";
     const cx = (result.colBorders[col]! + result.colBorders[col + 1]!) / 2;
     const cy = (result.rowBorders[row]! + result.rowBorders[row + 1]!) / 2;
     const fontSize = Math.max(10, Math.min(24, Math.floor(result.cellSize.width * 0.3)));

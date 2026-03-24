@@ -9,7 +9,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, test, expect } from "vitest";
-import { detectBoard, type CellState } from "../vision.js";
+import { detectBoard, charToCellState, cellStateToChar, type CellState } from "../vision.js";
 
 const FIXTURES = join(import.meta.dirname, "fixtures");
 const IMAGES_DIR = join(FIXTURES, "images");
@@ -19,26 +19,11 @@ function imagePath(name: string): string {
   return join(IMAGES_DIR, name);
 }
 
-const charMap: Record<string, CellState> = {
-  ".": "hidden",
-  " ": "empty",
-  F: "flag",
-  "*": "mine",
-  "1": "1", "2": "2", "3": "3", "4": "4",
-  "5": "5", "6": "6", "7": "7", "8": "8",
-};
-
-const reverseCharMap: Record<CellState, string> = {
-  hidden: ".", empty: " ", flag: "F", mine: "*", unknown: "?",
-  "1": "1", "2": "2", "3": "3", "4": "4",
-  "5": "5", "6": "6", "7": "7", "8": "8",
-};
-
 function parseGroundTruth(text: string): (CellState | null)[][] {
   return text.trimEnd().split("\n").map((line) => {
     return [...line].map((ch) => {
       if (ch === "?") return null;
-      return charMap[ch] ?? null;
+      return charToCellState[ch] ?? null;
     });
   });
 }
@@ -98,12 +83,12 @@ describe("Clean One grid detection", () => {
           const detRow = row + dr;
           const detCol = col + dc;
           if (detRow < 0 || detRow >= result.rows || detCol < 0 || detCol >= result.cols) {
-            errors.push(`(${col},${row}): expected '${reverseCharMap[expected]}', got OUT OF BOUNDS`);
+            errors.push(`(${col},${row}): expected '${cellStateToChar[expected!]}', got OUT OF BOUNDS`);
             continue;
           }
           const detected = result.board[detRow]![detCol] ?? "unknown";
           if (detected !== expected) {
-            errors.push(`(${col},${row}): expected '${reverseCharMap[expected]}', got '${reverseCharMap[detected]}'`);
+            errors.push(`(${col},${row}): expected '${cellStateToChar[expected!]}', got '${cellStateToChar[detected]}'`);
           }
         }
       }

@@ -13,26 +13,10 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { detectBoard, type CellState } from "../src/vision.js";
+import { detectBoard, cellStateToChar, type CellState } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const DATA_DIR = join(import.meta.dirname, "..", "data");
-
-const charMap: Record<CellState, string> = {
-  hidden: ".",
-  empty: " ",
-  flag: "F",
-  mine: "*",
-  "1": "1",
-  "2": "2",
-  "3": "3",
-  "4": "4",
-  "5": "5",
-  "6": "6",
-  "7": "7",
-  "8": "8",
-  unknown: "?",
-};
 
 function renderBoard(board: CellState[][]): string {
   const lines: string[] = [];
@@ -46,7 +30,7 @@ function renderBoard(board: CellState[][]): string {
   }
   for (let r = 0; r < board.length; r++) {
     const prefix = String(r).padStart(2, " ") + "│";
-    lines.push(prefix + board[r]!.map((c) => charMap[c]).join(""));
+    lines.push(prefix + board[r]!.map((c) => cellStateToChar[c]).join(""));
   }
   return lines.join("\n");
 }
