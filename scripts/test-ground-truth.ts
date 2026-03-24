@@ -12,7 +12,7 @@
 
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { detectBoard, cvReady, type CellState } from "../src/vision.js";
+import { detectBoard, type CellState } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const GT_DIR = join(import.meta.dirname, "..", "data", "ground-truth");
@@ -40,8 +40,6 @@ function parseGroundTruth(text: string): (CellState | null)[][] {
     });
   });
 }
-
-await cvReady;
 
 const specificFile = process.argv[2];
 const gtFiles = specificFile

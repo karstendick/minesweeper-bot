@@ -8,7 +8,7 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import sharp from "sharp";
-import { detectBoard, cvReady } from "../src/vision.js";
+import { detectBoard } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const OUT_DIR = join(import.meta.dirname, "..", "data", "debug");
@@ -23,7 +23,6 @@ if (!filename) {
 const imagePath = filename.includes("/") ? filename : join(IMAGES_DIR, filename);
 const baseName = filename.replace(/.*\//, "").replace(/\.[^.]+$/, "");
 
-await cvReady;
 const result = await detectBoard(imagePath);
 if (!result) {
   console.log("No grid detected.");

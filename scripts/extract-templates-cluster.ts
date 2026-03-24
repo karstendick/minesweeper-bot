@@ -7,14 +7,13 @@
 
 import { join } from "node:path";
 import sharp from "sharp";
-import { detectBoard, cvReady } from "../src/vision.js";
+import { detectBoard } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const filename = process.argv[2] ?? "1jhbi9c.jpeg";
 const imagePath = filename.includes("/") ? filename : join(IMAGES_DIR, filename);
 const assignments = process.argv.slice(3);
 
-await cvReady;
 const result = await detectBoard(imagePath);
 if (!result) { console.log("No grid"); process.exit(1); }
 

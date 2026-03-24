@@ -13,7 +13,7 @@
 
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { detectBoard, cvReady, type CellState } from "../src/vision.js";
+import { detectBoard, type CellState } from "../src/vision.js";
 
 const IMAGES_DIR = join(import.meta.dirname, "..", "data", "images");
 const DATA_DIR = join(import.meta.dirname, "..", "data");
@@ -55,7 +55,6 @@ async function checkImage(filename: string): Promise<void> {
   const imagePath = filename.includes("/") ? filename : join(IMAGES_DIR, filename);
   const baseName = filename.includes("/") ? filename.split("/").pop()! : filename;
 
-  await cvReady;
   const start = performance.now();
   const result = await detectBoard(imagePath);
   const elapsed = performance.now() - start;
