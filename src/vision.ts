@@ -58,32 +58,65 @@ function getPixel(img: ImageData, x: number, y: number): [number, number, number
 
 // --- Skin detection ---
 
-type Skin = "classic" | "unknown";
+type Skin = "classic" | "clean-one" | "unknown";
+
+/** "Minesweeper - The Clean One" hidden cells: orange ~(220,130,60) */
+function isCleanOneOrange(r: number, g: number, b: number): boolean {
+  return r >= 200 && r <= 240 && g >= 110 && g <= 150 && b >= 40 && b <= 80 && r - g > 70;
+}
+
+/** "The Clean One" dark background: neutral gray ~(50,50,50) */
+function isCleanOneDark(r: number, g: number, b: number): boolean {
+  return r >= 35 && r <= 65 && g >= 35 && g <= 65 && b >= 35 && b <= 65 &&
+    Math.max(r, g, b) - Math.min(r, g, b) < 15;
+}
+
+export { type Skin };
+
+export async function classifySkin(imagePath: string): Promise<Skin> {
+  const img = await loadImageRaw(imagePath);
+  return detectSkin(img);
+}
 
 function detectSkin(img: ImageData): Skin {
-  // Classic skin: dominant gray value is 192 or 198
-  // Count pixels at key gray values (with JPEG tolerance)
-  let grayFace = 0;   // ~192-200 (cell face / frame)
-  let grayBorder = 0; // ~128 (cell borders)
+  let grayFace = 0;
+  let grayBorder = 0;
+  let orangePixels = 0;
+  let darkPixels = 0;
   const sampleStep = 3;
+  let total = 0;
 
   for (let y = 0; y < img.height; y += sampleStep) {
     for (let x = 0; x < img.width; x += sampleStep) {
+      total++;
       const [r, g, b] = getPixel(img, x, y);
-      if (Math.max(r, g, b) - Math.min(r, g, b) > 15) continue; // skip colored
-      const gray = Math.round((r + g + b) / 3);
-      if (gray >= 185 && gray <= 205) grayFace++;
-      if (gray >= 120 && gray <= 136) grayBorder++;
+
+      // Clean One: orange hidden cells + dark background
+      if (isCleanOneOrange(r, g, b)) orangePixels++;
+      if (isCleanOneDark(r, g, b)) darkPixels++;
+      const gray = (r + g + b) / 3;
+
+      // Classic: gray face + gray border
+      if (Math.max(r, g, b) - Math.min(r, g, b) <= 15) {
+        if (gray >= 185 && gray <= 205) grayFace++;
+        if (gray >= 120 && gray <= 136) grayBorder++;
+      }
     }
   }
 
-  const totalSampled = Math.floor(img.width / sampleStep) * Math.floor(img.height / sampleStep);
-  const classicGrayPct = grayFace / totalSampled;
-  const borderPct = grayBorder / totalSampled;
+  const classicGrayPct = grayFace / total;
+  const borderPct = grayBorder / total;
+  const orangePct = orangePixels / total;
+  const darkPct = darkPixels / total;
 
-  // Classic skin: >20% of pixels are face gray, with some border gray
+  // Classic skin: lots of 198 gray + 128 borders
   if (classicGrayPct > 0.15 && borderPct > 0.01) {
     return "classic";
+  }
+
+  // Clean One: orange hidden cells + dark background
+  if (orangePct > 0.08 && darkPct > 0.08) {
+    return "clean-one";
   }
 
   return "unknown";
@@ -571,6 +604,768 @@ function classifyClassicCell(
   return bestMatch;
 }
 
+// --- Clean One grid detection ---
+// "Minesweeper - The Clean One" has:
+//   - Orange hidden cells ~(215,127,55)
+//   - Dark revealed cells ~(51,51,51)
+//   - Thin (~5px) grid lines between cells visible as R-channel dips in JPEG
+//   - No visible grid lines between same-state cells in PNG
+//   - Board extends edge-to-edge (may be clipped by screen)
+
+function detectCleanOneGrid(img: ImageData): {
+  colBorders: number[]; rowBorders: number[]; cellWidth: number; cellHeight: number; rows: number; cols: number;
+} | null {
+  const { width, height } = img;
+
+  // Step 1: Find cell size via autocorrelation on the R-channel derivative
+  // across the full image. Grid lines create periodic patterns regardless
+  // of whether cells are hidden or revealed.
+  const cellSize = findCleanOneCellSize(img);
+  if (!cellSize) return null;
+
+  const cellW = cellSize.w;
+  const cellH = cellSize.h;
+
+  // Step 2: Slide a cell-sized window across the image and classify each
+  // position. A cell is "board" if it looks like hidden (orange) or
+  // revealed (dark). This finds the board without needing to pre-compute bounds.
+  // We scan at cell-pitch intervals starting from every possible offset.
+
+  // Try all possible grid offsets (0 to cellW-1) and find the one where
+  // the most cell-sized windows classify as board content.
+  let bestOffX = 0, bestOffY = 0, bestBoardCount = 0;
+  const offStep = Math.max(1, Math.floor(cellW / 8));
+
+  for (let offX = 0; offX < cellW; offX += offStep) {
+    for (let offY = 0; offY < cellH; offY += offStep) {
+      let boardCount = 0;
+      for (let cy = offY; cy + cellH <= height; cy += cellH) {
+        for (let cx = offX; cx + cellW <= width; cx += cellW) {
+          // Score cells that are cleanly orange OR cleanly dark (not mixed).
+          // Well-aligned grids have pure cells; misaligned ones straddle boundaries.
+          const inset = Math.floor(Math.min(cellW, cellH) * 0.2);
+          let orangeCount = 0, darkCount = 0, sampled = 0;
+          for (let dy = inset; dy < cellH - inset; dy += 4) {
+            for (let dx = inset; dx < cellW - inset; dx += 4) {
+              const px = cx + dx, py = cy + dy;
+              if (px >= width || py >= height) continue;
+              sampled++;
+              const [r, g, b] = getPixel(img, px, py);
+              if (isCleanOneOrange(r, g, b)) orangeCount++;
+              else if (isCleanOneDark(r, g, b)) darkCount++;
+            }
+          }
+          if (sampled < 4) continue;
+          const oPct = orangeCount / sampled;
+          const dPct = darkCount / sampled;
+          // Cell is "clean" if it's mostly one type (>60% orange OR >60% dark)
+          if (oPct > 0.6 || dPct > 0.6) boardCount++;
+        }
+      }
+      if (boardCount > bestBoardCount) {
+        bestBoardCount = boardCount;
+        bestOffX = offX;
+        bestOffY = offY;
+      }
+    }
+  }
+
+  if (bestBoardCount < 3) return null;
+
+  // Step 3: With the best offset, find the rectangular extent of board cells.
+  // Classify each grid position and find the bounding box of board cells.
+  const maxCols = Math.floor((width - bestOffX) / cellW);
+  const maxRows = Math.floor((height - bestOffY) / cellH);
+
+  const isBoard: boolean[][] = [];
+  for (let row = 0; row < maxRows; row++) {
+    const rowArr: boolean[] = [];
+    for (let col = 0; col < maxCols; col++) {
+      const cx = bestOffX + col * cellW;
+      const cy = bestOffY + row * cellH;
+      rowArr.push(looksLikeBoardCell(img, cx, cy, cellW, cellH));
+    }
+    isBoard.push(rowArr);
+  }
+
+  // Find the largest rectangular region of board cells
+  let minCol = maxCols, maxCol = 0, minRow = maxRows, maxRow = 0;
+  for (let row = 0; row < maxRows; row++) {
+    for (let col = 0; col < maxCols; col++) {
+      if (isBoard[row]![col]) {
+        if (col < minCol) minCol = col;
+        if (col > maxCol) maxCol = col;
+        if (row < minRow) minRow = row;
+        if (row > maxRow) maxRow = row;
+      }
+    }
+  }
+
+  const cols = maxCol - minCol + 1;
+  const rows = maxRow - minRow + 1;
+  if (cols < 3 || rows < 3 || cols > 50 || rows > 50) return null;
+
+  // Compute border positions
+  const colBorders: number[] = [];
+  const rowBorders: number[] = [];
+  for (let i = 0; i <= cols; i++) {
+    colBorders.push(Math.round(bestOffX + (minCol + i) * cellW));
+  }
+  for (let i = 0; i <= rows; i++) {
+    rowBorders.push(Math.round(bestOffY + (minRow + i) * cellH));
+  }
+
+  return { colBorders, rowBorders, cellWidth: cellW, cellHeight: cellH, rows, cols };
+}
+
+/** Check if a cell-sized region looks like board content (orange, dark, or number glyph). */
+function looksLikeBoardCell(img: ImageData, cx: number, cy: number, cellW: number, cellH: number): boolean {
+  const insetX = Math.floor(cellW * 0.2);
+  const insetY = Math.floor(cellH * 0.2);
+  let boardPixels = 0, sampled = 0;
+
+  for (let dy = insetY; dy < cellH - insetY; dy += 4) {
+    for (let dx = insetX; dx < cellW - insetX; dx += 4) {
+      const x = cx + dx, y = cy + dy;
+      if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+      sampled++;
+      const [r, g, b] = getPixel(img, x, y);
+      // Board cells are orange (hidden) or dark gray (revealed bg).
+      // Number glyphs and flag icons are small relative to the bg.
+      if (isCleanOneOrange(r, g, b) || isCleanOneDark(r, g, b)) {
+        boardPixels++;
+      }
+    }
+  }
+
+  return sampled > 4 && boardPixels / sampled > 0.6;
+}
+
+/** Find cell size via full-image R-channel derivative autocorrelation. */
+function findCleanOneCellSize(img: ImageData): { w: number; h: number } | null {
+  const { width, height } = img;
+
+  // Horizontal projection: average R per column.
+  // Try both derivative and raw autocorrelation — pick the one that gives
+  // a stronger, more consistent result.
+  const hProj: number[] = [];
+  for (let x = 0; x < width; x++) {
+    let sum = 0, count = 0;
+    for (let y = 0; y < height; y += 3) {
+      const [r] = getPixel(img, x, y);
+      sum += r;
+      count++;
+    }
+    hProj.push(sum / count);
+  }
+  const hDeriv: number[] = [];
+  for (let i = 1; i < hProj.length; i++) {
+    hDeriv.push(Math.abs(hProj[i]! - hProj[i - 1]!));
+  }
+  const cellW = bestAutocorrelationPeak(hDeriv, 30, 300);
+
+  // Vertical projection: average R per row
+  const vProj: number[] = [];
+  for (let y = 0; y < height; y++) {
+    let sum = 0, count = 0;
+    for (let x = 0; x < width; x += 3) {
+      const [r] = getPixel(img, x, y);
+      sum += r;
+      count++;
+    }
+    vProj.push(sum / count);
+  }
+  const vDeriv: number[] = [];
+  for (let i = 1; i < vProj.length; i++) {
+    vDeriv.push(Math.abs(vProj[i]! - vProj[i - 1]!));
+  }
+  const cellH = bestAutocorrelationPeak(vDeriv, 30, 300);
+
+  if (cellW && cellH) return { w: cellW, h: cellH };
+  if (cellW) return { w: cellW, h: cellW }; // assume square
+  if (cellH) return { w: cellH, h: cellH };
+  return null;
+}
+
+/** Find the strongest autocorrelation peak using cluster scoring. */
+function bestAutocorrelationPeak(signal: number[], minPeriod: number, maxPeriod: number): number | null {
+  const n = signal.length;
+  const mean = signal.reduce((a, b) => a + b, 0) / n;
+  const norm = signal.map((v) => v - mean);
+
+  let ac0 = 0;
+  for (const v of norm) ac0 += v * v;
+  if (ac0 === 0) return null;
+
+  // Compute autocorrelation for all lags
+  const scores: number[] = [];
+  for (let lag = minPeriod; lag <= Math.min(maxPeriod, Math.floor(n / 2)); lag++) {
+    let ac = 0;
+    for (let i = 0; i < n - lag; i++) ac += norm[i]! * norm[i + lag]!;
+    scores.push(ac / ac0);
+  }
+
+  // Find all local maxima (peaks)
+  const peaks: { lag: number; score: number }[] = [];
+  for (let i = 1; i < scores.length - 1; i++) {
+    if (scores[i]! > scores[i - 1]! && scores[i]! > scores[i + 1]! && scores[i]! > 0.05) {
+      peaks.push({ lag: minPeriod + i, score: scores[i]! });
+    }
+  }
+
+  if (peaks.length === 0) return null;
+
+  // Score peaks by combining their own strength with nearby peaks' strength.
+  // True cell sizes have clusters of strong peaks around them; artifacts don't.
+  // Use a ±10% window to accumulate support.
+  let bestLag = peaks[0]!.lag;
+  let bestSupport = 0;
+
+  for (const p of peaks) {
+    let support = 0;
+    for (const q of peaks) {
+      if (Math.abs(q.lag - p.lag) / p.lag < 0.1) {
+        support += q.score;
+      }
+    }
+    if (support > bestSupport) {
+      bestSupport = support;
+      bestLag = p.lag;
+    }
+  }
+
+  // Within the winning cluster, pick the peak with the highest score
+  const clusterPeaks = peaks.filter((p) => Math.abs(p.lag - bestLag) / bestLag < 0.1);
+  clusterPeaks.sort((a, b) => b.score - a.score);
+
+  return clusterPeaks[0]!.lag;
+}
+
+// --- Clean One cell classification ---
+// Hidden: orange ~(215, 127, 55)
+// Revealed empty: dark ~(51, 51, 51)
+// Revealed numbers: gray/white text on dark background (all numbers same color)
+// Flag: flag icon on orange background
+//
+// Number recognition uses template matching since all digits are the same color.
+// We extract the bright region, normalize its bounding box to 8x10, and match.
+
+// Templates are 16 wide x 20 tall binary bitmaps.
+// Extracted from actual cluster-based bbox-normalized cell bitmaps.
+// The cluster approach finds the densest group of bright pixels (the digit)
+// and normalizes that region to the template size using area-averaging.
+const CLEAN_ONE_TEMPLATES: { state: CellState; bitmap: string }[] = [
+  // "1" (170px) — serif + vertical stroke
+  { state: "1", bitmap:
+    "0000000000000000" +
+    "0000000000111110" +
+    "0000000011111110" +
+    "0000001111111110" +
+    "0000111111111110" +
+    "0011111110011110" +
+    "0011110000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000001100"
+  },
+  // "1" (237px) — same shape, thicker strokes
+  { state: "1", bitmap:
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000011110" +
+    "0000000000111110" +
+    "0000000001111110" +
+    "0000000011111110" +
+    "0000000111111110" +
+    "0000001111111110" +
+    "0000011111111110" +
+    "0000111111111110" +
+    "0001111111011110" +
+    "0001111110011110" +
+    "0011111100011110" +
+    "0111111000011110" +
+    "0011110000011110" +
+    "0011100000011110" +
+    "0001000000011110" +
+    "0000000000011110" +
+    "0000000000011110" +
+    "0000000000011110"
+  },
+  // "2" (170px) — top curve, sweeps down-left, bottom bar
+  { state: "2", bitmap:
+    "0000000000000000" +
+    "0000011111110000" +
+    "0000111111111000" +
+    "0001110000111100" +
+    "0011100000001100" +
+    "0011100000001110" +
+    "0011000000001110" +
+    "0000000000001110" +
+    "0000000000011100" +
+    "0000000000111100" +
+    "0000000001111000" +
+    "0000000011110000" +
+    "0000000111100000" +
+    "0000001111000000" +
+    "0000111110000000" +
+    "0001111000000000" +
+    "0011110000000000" +
+    "0111111111111110" +
+    "0111111111111110" +
+    "0000000000000000"
+  },
+  // "2" (237px) — same shape, thicker
+  { state: "2", bitmap:
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000001111000000" +
+    "0000011111110000" +
+    "0000111111110000" +
+    "0001111111111000" +
+    "0001111111111100" +
+    "0011110000111100" +
+    "0011110000011100" +
+    "0011100000011110" +
+    "0011100000001110" +
+    "0111100000001110" +
+    "0111000000001110" +
+    "0111000000001110" +
+    "0111000000001110" +
+    "0000000000001110" +
+    "0000000000001110" +
+    "0000000000001110" +
+    "0000000000011110" +
+    "0000000000011100"
+  },
+  // "3" (170px) — top bar, middle curve, bottom curve
+  { state: "3", bitmap:
+    "0000000000000000" +
+    "0011111111111110" +
+    "0011111111111110" +
+    "0000000000111100" +
+    "0000000000111000" +
+    "0000000001110000" +
+    "0000000011100000" +
+    "0000000111000000" +
+    "0000001111000000" +
+    "0000011111111000" +
+    "0000011111111100" +
+    "0000000000011110" +
+    "0000000000001110" +
+    "0000000000000110" +
+    "0010000000000110" +
+    "0111000000001110" +
+    "0011100000011110" +
+    "0011111111111100" +
+    "0001111111111000" +
+    "0000000110000000"
+  },
+  // "3" (237px) — filled top half, narrowing bottom-right
+  { state: "3", bitmap:
+    "0000000000000000" +
+    "0011111111111100" +
+    "0111111111111110" +
+    "0111111111111110" +
+    "0111111111111110" +
+    "0111111111111110" +
+    "0011111111111110" +
+    "0000000000111100" +
+    "0000000000111100" +
+    "0000000001111000" +
+    "0000000001111000" +
+    "0000000011110000" +
+    "0000000011110000" +
+    "0000000111110000" +
+    "0000000111100000" +
+    "0000000111000000" +
+    "0000001111000000" +
+    "0000001110000000" +
+    "0000011111000000" +
+    "0000011111110000"
+  },
+  // "4" (170px) — ascending diagonal + crossbar
+  { state: "4", bitmap:
+    "0000000000000000" +
+    "0000000000111000" +
+    "0000000001111000" +
+    "0000000011111000" +
+    "0000000111111000" +
+    "0000000111111000" +
+    "0000001110111000" +
+    "0000011100111000" +
+    "0000111100111000" +
+    "0000111000111000" +
+    "0001110000111000" +
+    "0011100000111000" +
+    "0111100000111000" +
+    "0111111111111111" +
+    "0111111111111110" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000111000" +
+    "0000000000010000"
+  },
+  // "4" (237px) — filled triangle
+  { state: "4", bitmap:
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000011100" +
+    "0000000000111110" +
+    "0000000000111110" +
+    "0000000001111110" +
+    "0000000001111110" +
+    "0000000011111110" +
+    "0000000011111110" +
+    "0000000111111110" +
+    "0000000111111110" +
+    "0000001111111110" +
+    "0000001111011110" +
+    "0000011111011110" +
+    "0000111110011110" +
+    "0000111110011110" +
+    "0001111100011110" +
+    "0001111100011110" +
+    "0011111000011110" +
+    "0011110000011110"
+  },
+  // "5" (237px) — top bar, left stem, bottom curve
+  { state: "5", bitmap:
+    "0000000000000000" +
+    "0001111111111100" +
+    "0001111111111100" +
+    "0001110000000000" +
+    "0011100000000000" +
+    "0011100000000000" +
+    "0011100000000000" +
+    "0011111111100000" +
+    "0011111111111000" +
+    "0011111111111100" +
+    "0011100000011110" +
+    "0000000000001110" +
+    "0000000000000110" +
+    "0000000000000110" +
+    "0111000000000110" +
+    "0111000000001110" +
+    "0011110000011110" +
+    "0001111111111100" +
+    "0000111111110000" +
+    "0000000000000000"
+  },
+  // "6" (standard shape)
+  { state: "6", bitmap:
+    "0000011111100000" +
+    "0001111111110000" +
+    "0011111000000000" +
+    "0111110000000000" +
+    "0111100000000000" +
+    "0111100000000000" +
+    "0111111111110000" +
+    "0111111111111000" +
+    "0111110000011100" +
+    "0111100000001110" +
+    "0111100000001110" +
+    "0111100000001110" +
+    "0111100000001110" +
+    "0011110000011100" +
+    "0001111111111000" +
+    "0000111111110000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000"
+  },
+  // "7" (top bar, diagonal down-left)
+  { state: "7", bitmap:
+    "1111111111111110" +
+    "1111111111111110" +
+    "0000000000111000" +
+    "0000000001110000" +
+    "0000000001110000" +
+    "0000000011100000" +
+    "0000000011100000" +
+    "0000000111000000" +
+    "0000000111000000" +
+    "0000001110000000" +
+    "0000001110000000" +
+    "0000011100000000" +
+    "0000011100000000" +
+    "0000111000000000" +
+    "0000111000000000" +
+    "0001110000000000" +
+    "0001110000000000" +
+    "0011100000000000" +
+    "0011100000000000" +
+    "0111000000000000"
+  },
+  // "8" (two loops)
+  { state: "8", bitmap:
+    "0000111111100000" +
+    "0001111111110000" +
+    "0011110000111000" +
+    "0111100000011100" +
+    "0111100000011100" +
+    "0011110000111000" +
+    "0001111111110000" +
+    "0001111111110000" +
+    "0011110000111000" +
+    "0111100000011100" +
+    "0111100000011100" +
+    "0111100000011100" +
+    "0111100000011100" +
+    "0011110000111000" +
+    "0001111111110000" +
+    "0000111111100000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000" +
+    "0000000000000000"
+  },
+];
+
+const TMPL_W = 16;
+const TMPL_H = 20;
+
+function matchCleanOneDigit(bitmap: number[]): CellState {
+  let bestState: CellState = "unknown";
+  let bestScore = -Infinity;
+
+  for (const tmpl of CLEAN_ONE_TEMPLATES) {
+    // Normalized cross-correlation
+    let sumAB = 0, sumAA = 0, sumBB = 0;
+    const n = TMPL_W * TMPL_H;
+    // Compute means
+    let meanA = 0, meanB = 0;
+    for (let i = 0; i < n; i++) {
+      meanA += bitmap[i]!;
+      meanB += (tmpl.bitmap[i] === "1" ? 1 : 0);
+    }
+    meanA /= n;
+    meanB /= n;
+
+    for (let i = 0; i < n; i++) {
+      const a = bitmap[i]! - meanA;
+      const b = (tmpl.bitmap[i] === "1" ? 1 : 0) - meanB;
+      sumAB += a * b;
+      sumAA += a * a;
+      sumBB += b * b;
+    }
+
+    const denom = Math.sqrt(sumAA * sumBB);
+    const score = denom > 0 ? sumAB / denom : 0;
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestState = tmpl.state;
+    }
+  }
+
+  // Require minimum correlation
+  if (bestScore < 0.25) return "unknown";
+  return bestState;
+}
+
+function classifyCleanOneCell(
+  img: ImageData,
+  cellX: number,
+  cellY: number,
+  cellW: number,
+  cellH: number,
+): CellState {
+  // Sample the inner region (skip ~20% border to avoid grid lines)
+  const insetX = Math.floor(cellW * 0.2);
+  const insetY = Math.floor(cellH * 0.2);
+  const innerW = cellW - 2 * insetX;
+  const innerH = cellH - 2 * insetY;
+  if (innerW <= 2 || innerH <= 2) return "unknown";
+
+  // Classify pixels into categories:
+  // - orange: hidden cell background (R~215, G~127, B~55)
+  // - dark: revealed cell background (gray 35-65)
+  // - glyph: number/icon pixels on revealed background (gray 66-200, or colored)
+  // - bright: very bright pixels (gray >200, e.g. white highlights)
+  let orangeCount = 0;
+  let darkCount = 0;
+  let glyphCount = 0;  // medium gray or colored — number text, flag icons
+  let total = 0;
+  let redCount = 0;    // for flag detection
+
+  for (let dy = 0; dy < innerH; dy += 2) {
+    for (let dx = 0; dx < innerW; dx += 2) {
+      const x = cellX + insetX + dx;
+      const y = cellY + insetY + dy;
+      if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+      total++;
+      const [r, g, b] = getPixel(img, x, y);
+      const gray = (r + g + b) / 3;
+
+      if (isCleanOneOrange(r, g, b)) {
+        orangeCount++;
+      } else if (gray <= 65 && Math.max(r, g, b) - Math.min(r, g, b) < 20) {
+        darkCount++;
+      } else if (gray > 65) {
+        glyphCount++;
+        if (r > 150 && g < 80 && b < 80) redCount++;
+      }
+    }
+  }
+
+  if (total === 0) return "unknown";
+
+  const orangePct = orangeCount / total;
+  const darkPct = darkCount / total;
+  const glyphPct = glyphCount / total;
+  const boardPct = orangePct + darkPct + glyphPct;
+
+  // If most pixels aren't recognizable, this isn't a cell
+  if (boardPct < 0.6) return "unknown";
+
+  // Mostly orange = hidden or flag
+  if (orangePct > 0.6) {
+    // Check for flag: flags have red pixels on orange background
+    if (redCount > 5) return "flag";
+    return "hidden";
+  }
+
+  // Revealed cell: mostly dark + some glyph pixels
+  if (darkPct + glyphPct > 0.5 && orangePct < 0.3) {
+    // Very few glyph pixels = empty revealed cell
+    if (glyphPct < 0.03) return "empty";
+
+    // Distinguish flags from numbers by glyph brightness:
+    // Numbers are rendered bright white (~200-240 gray)
+    // Flags are rendered medium gray (~90-110 gray)
+    let brightGlyphs = 0, dimGlyphs = 0;
+    for (let dy = 0; dy < innerH; dy += 3) {
+      for (let dx = 0; dx < innerW; dx += 3) {
+        const x = cellX + insetX + dx;
+        const y = cellY + insetY + dy;
+        if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+        const [r, g, b] = getPixel(img, x, y);
+        const gray = (r + g + b) / 3;
+        if (gray > 170) brightGlyphs++;
+        else if (gray > 65) dimGlyphs++;
+      }
+    }
+
+    // Flag detection: flags are dominated by gray ~100 icon pixels (>15% of cell).
+    // A few scattered gray pixels from grid separators don't count.
+    if (glyphPct > 0.15 && dimGlyphs > brightGlyphs * 5 && brightGlyphs < 5) return "flag";
+
+    // Has glyph pixels = number. Find the digit by locating the densest
+    // cluster of bright pixels, then normalize that region to TMPL_W x TMPL_H
+    // using area-averaging. This works across all cell sizes.
+
+    const margin = Math.floor(Math.min(cellW, cellH) * 0.08);
+
+    // Compute threshold
+    let bgSum = 0, bgCount = 0;
+    for (let dy = margin; dy < cellH - margin; dy += 5) {
+      for (let dx = margin; dx < cellW - margin; dx += 5) {
+        const x = cellX + dx, y = cellY + dy;
+        if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+        const [r, g, b] = getPixel(img, x, y);
+        const gray = (r + g + b) / 3;
+        if (gray < 100) { bgSum += gray; bgCount++; }
+      }
+    }
+    const bgLevel = bgCount > 0 ? bgSum / bgCount : 51;
+    const glyphThreshold = bgLevel + (220 - bgLevel) * 0.5;
+
+    // Collect all bright pixel positions
+    const brightPts: { x: number; y: number }[] = [];
+    for (let dy = margin; dy < cellH - margin; dy += 2) {
+      for (let dx = margin; dx < cellW - margin; dx += 2) {
+        const x = cellX + dx, y = cellY + dy;
+        if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+        const [r, g, b] = getPixel(img, x, y);
+        if ((r + g + b) / 3 > glyphThreshold) {
+          brightPts.push({ x: dx, y: dy });
+        }
+      }
+    }
+
+    if (brightPts.length < 3) return "empty";
+
+    // Find the densest cluster: compute the centroid, then keep only points
+    // within a radius of the digit size (expected ~15-30% of cell width).
+    const maxRadius = Math.floor(Math.min(cellW, cellH) * 0.25);
+
+    // Use iterative centroid: start from the median point, then refine
+    let cx = brightPts.map(p => p.x).sort((a, b) => a - b)[Math.floor(brightPts.length / 2)]!;
+    let cy = brightPts.map(p => p.y).sort((a, b) => a - b)[Math.floor(brightPts.length / 2)]!;
+
+    for (let iter = 0; iter < 3; iter++) {
+      const nearby = brightPts.filter(p =>
+        Math.abs(p.x - cx) < maxRadius && Math.abs(p.y - cy) < maxRadius
+      );
+      if (nearby.length === 0) break;
+      cx = Math.round(nearby.reduce((s, p) => s + p.x, 0) / nearby.length);
+      cy = Math.round(nearby.reduce((s, p) => s + p.y, 0) / nearby.length);
+    }
+
+    // Get the bbox of points near the centroid
+    const cluster = brightPts.filter(p =>
+      Math.abs(p.x - cx) < maxRadius && Math.abs(p.y - cy) < maxRadius
+    );
+    if (cluster.length < 3) return "empty";
+
+    let gMinX = cellW, gMaxX = 0, gMinY = cellH, gMaxY = 0;
+    for (const p of cluster) {
+      if (p.x < gMinX) gMinX = p.x;
+      if (p.x > gMaxX) gMaxX = p.x;
+      if (p.y < gMinY) gMinY = p.y;
+      if (p.y > gMaxY) gMaxY = p.y;
+    }
+
+    // Add small padding around the digit
+    const pad = Math.max(2, Math.floor(Math.min(cellW, cellH) * 0.02));
+    gMinX = Math.max(margin, gMinX - pad);
+    gMaxX = Math.min(cellW - margin - 1, gMaxX + pad);
+    gMinY = Math.max(margin, gMinY - pad);
+    gMaxY = Math.min(cellH - margin - 1, gMaxY + pad);
+
+    const gW = gMaxX - gMinX + 1;
+    const gH = gMaxY - gMinY + 1;
+    if (gW < 3 || gH < 3) return "empty";
+
+    // Normalize the digit region to TMPL_W x TMPL_H using area-averaging
+    const bitmap: number[] = new Array(TMPL_W * TMPL_H).fill(0);
+    for (let ty = 0; ty < TMPL_H; ty++) {
+      for (let tx = 0; tx < TMPL_W; tx++) {
+        const x0 = cellX + gMinX + Math.floor(tx * gW / TMPL_W);
+        const x1 = cellX + gMinX + Math.floor((tx + 1) * gW / TMPL_W);
+        const y0 = cellY + gMinY + Math.floor(ty * gH / TMPL_H);
+        const y1 = cellY + gMinY + Math.floor((ty + 1) * gH / TMPL_H);
+        let sum = 0, count = 0;
+        for (let y = y0; y < y1; y++) {
+          for (let x = x0; x < x1; x++) {
+            if (x < 0 || x >= img.width || y < 0 || y >= img.height) continue;
+            const [r, g, b] = getPixel(img, x, y);
+            sum += (r + g + b) / 3;
+            count++;
+          }
+        }
+        bitmap[ty * TMPL_W + tx] = (count > 0 && sum / count > glyphThreshold) ? 1 : 0;
+      }
+    }
+
+    return matchCleanOneDigit(bitmap);
+  }
+
+  return "unknown";
+}
+
 // --- Main entry point ---
 
 export async function detectBoard(imagePath: string): Promise<BoardDetectionResult | null> {
@@ -612,6 +1407,83 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
       rows: grid.rows,
       cols: grid.cols,
       skin: "classic",
+    };
+  }
+
+  if (skin === "clean-one") {
+    const grid = detectCleanOneGrid(img);
+    if (!grid) return null;
+
+    let board: CellState[][] = [];
+    for (let row = 0; row < grid.rows; row++) {
+      const rowCells: CellState[] = [];
+      const cellY = grid.rowBorders[row]!;
+      const cellH = grid.rowBorders[row + 1]! - cellY;
+      for (let col = 0; col < grid.cols; col++) {
+        const cellX = grid.colBorders[col]!;
+        const cellW = grid.colBorders[col + 1]! - cellX;
+        rowCells.push(classifyCleanOneCell(img, cellX, cellY, cellW, cellH));
+      }
+      board.push(rowCells);
+    }
+
+    // Trim rows/cols from edges that don't contain real board content.
+    // Real board rows have hidden cells or recognized numbers.
+    // Edge rows with only empty+unknown are likely app UI (header/footer).
+    let { colBorders, rowBorders } = grid;
+    let { rows, cols } = grid;
+
+    // Trim edge rows/cols that have no confident cell classifications.
+    // A row with only "unknown" and "empty" at the edge is likely app UI.
+    // Real board rows have hidden cells, flags, or recognized numbers.
+    function isNonBoardRow(r: CellState[]): boolean {
+      return r.every((c) => c === "unknown" || c === "empty");
+    }
+    function isNonBoardCol(colIdx: number): boolean {
+      return board.every((r) => r[colIdx] === "unknown" || r[colIdx] === "empty");
+    }
+
+    // Trim top rows
+    while (rows > 0 && isNonBoardRow(board[0]!)) {
+      board.shift();
+      rowBorders = rowBorders.slice(1);
+      rows--;
+    }
+    // Trim bottom rows
+    while (rows > 0 && isNonBoardRow(board[rows - 1]!)) {
+      board.pop();
+      rowBorders = rowBorders.slice(0, -1);
+      rows--;
+    }
+    // Trim left cols
+    while (cols > 0 && isNonBoardCol(0)) {
+      board = board.map((r) => r.slice(1));
+      colBorders = colBorders.slice(1);
+      cols--;
+    }
+    // Trim right cols
+    while (cols > 0 && isNonBoardCol(cols - 1)) {
+      board = board.map((r) => r.slice(0, -1));
+      colBorders = colBorders.slice(0, -1);
+      cols--;
+    }
+
+    if (rows < 3 || cols < 3) return null;
+
+    const x = colBorders[0]!;
+    const y = rowBorders[0]!;
+    const w = colBorders[cols]! - x;
+    const h = rowBorders[rows]! - y;
+
+    return {
+      board,
+      gridBounds: { x, y, width: w, height: h },
+      cellSize: { width: grid.cellWidth, height: grid.cellHeight },
+      colBorders,
+      rowBorders,
+      rows,
+      cols,
+      skin: "clean-one",
     };
   }
 
