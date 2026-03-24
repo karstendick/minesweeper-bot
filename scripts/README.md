@@ -16,12 +16,6 @@
 
 ## Testing & Verification
 
-- **test-ground-truth.ts** — Test vision pipeline against ground truth files, report per-cell accuracy
-  ```
-  npx tsx scripts/test-ground-truth.ts            # test all ground truth files
-  npx tsx scripts/test-ground-truth.ts <image>    # test one image
-  ```
-
 - **test-vision.ts** — Run vision pipeline against all images, report aggregate stats
   ```
   npx tsx scripts/test-vision.ts [--limit 10] [--verbose]
