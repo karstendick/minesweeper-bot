@@ -17,7 +17,6 @@ import { CLASSIC_TEMPLATES } from "./classic-templates.js";
 // --- Color predicates ---
 
 const BORDER_TOL = 4;
-const FACE_TOL = 6;
 const WHITE_TOL = 8;
 
 function isBorderGray(r: number, g: number, b: number, tol: number = BORDER_TOL): boolean {
@@ -27,12 +26,6 @@ function isBorderGray(r: number, g: number, b: number, tol: number = BORDER_TOL)
          Math.max(r, g, b) - Math.min(r, g, b) <= Math.max(6, tol);
 }
 
-function isFaceGray(r: number, g: number, b: number): boolean {
-  return Math.abs(r - 198) <= FACE_TOL &&
-         Math.abs(g - 198) <= FACE_TOL &&
-         Math.abs(b - 198) <= FACE_TOL &&
-         Math.max(r, g, b) - Math.min(r, g, b) <= 8;
-}
 
 function isWhite(r: number, g: number, b: number): boolean {
   return r >= 255 - WHITE_TOL && g >= 255 - WHITE_TOL && b >= 255 - WHITE_TOL;
@@ -56,16 +49,21 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
 
   // Scan multiple horizontal rows for 128-gray border pixels and merge results.
   // A single row can miss borders where number text interrupts the border pixel.
+  // Skip scan rows that land on horizontal border lines (where most pixels are
+  // border-gray), as these contaminate vertical border detection.
   const hBorderSet = new Set<number>();
   const scanYs = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].map((f) => Math.floor(height * f));
 
   for (const scanY of scanYs) {
+    const rowBorders: number[] = [];
     for (let x = 0; x < width; x++) {
       const [r, g, b] = getPixel(img, x, scanY);
-      if (isBorderGray(r, g, b, borderTol)) {
-        hBorderSet.add(x);
-      }
+      if (isBorderGray(r, g, b, borderTol)) rowBorders.push(x);
     }
+    // If > 40% of the width is border-gray, this scan row is on a horizontal
+    // border line — skip it to avoid flooding vertical border detection.
+    if (rowBorders.length > width * 0.4) continue;
+    for (const x of rowBorders) hBorderSet.add(x);
   }
 
   // Cluster consecutive border pixels (borders can be 1-3px wide).
@@ -261,9 +259,9 @@ function findGridLines(positions: number[], cellSize: number, maxSkip: number = 
 
 function hasBoardContent(img: ImageData, cellX: number, cellY: number, cellSize: number): boolean {
   const inset = Math.floor(cellSize * 0.25);
-  let count198 = 0;
+  let countFace = 0;
   let countColor = 0;
-  let count255 = 0;
+  let countWhite = 0;
   let total = 0;
 
   for (let dy = inset; dy < cellSize - inset; dy++) {
@@ -273,14 +271,18 @@ function hasBoardContent(img: ImageData, cellX: number, cellY: number, cellSize:
       if (x < 0 || x >= img.width || y < 0 || y >= img.height) return false;
       const [r, g, b] = getPixel(img, x, y);
       total++;
-      if (isFaceGray(r, g, b)) count198++;
-      if (isWhite(r, g, b)) count255++;
+      // Use wider tolerance for face gray — some images have slightly shifted
+      // gray levels (e.g., 189 instead of 198).
+      const brightness = (r + g + b) / 3;
+      if (brightness >= 180 && brightness <= 210 &&
+          Math.max(r, g, b) - Math.min(r, g, b) <= 12) countFace++;
+      if (isWhite(r, g, b)) countWhite++;
       if (Math.max(r, g, b) - Math.min(r, g, b) > 20) countColor++;
     }
   }
 
   if (total === 0) return false;
-  return (count198 + countColor + count255) / total > 0.3;
+  return (countFace + countColor + countWhite) / total > 0.3;
 }
 
 // --- Cell classification ---
@@ -310,11 +312,22 @@ export function classifyClassicCell(
   if (cellSize <= 6) return "unknown";
 
   // Hidden/flag detection: scan for bright bevel strip at the top of the cell.
-  // Normal hidden cells have white (255) bevel pixels. Green-highlighted "safe"
-  // cells have bright green-tinted bevel pixels. Both indicate hidden state.
+  // Normally scan from dy=2 to skip the border row. But for cells where the
+  // bevel starts at dy=0 (e.g., cells added by grid extension at image edges),
+  // also include dy=1 if dy=0 is also bright.
+  function isBevelBright(r: number, g: number, b: number): boolean {
+    return isWhite(r, g, b) || (Math.max(r, g, b) >= 240 && Math.min(r, g, b) >= 180);
+  }
+
   let maxBrightInRow = 0;
-  const bevelEnd = Math.min(Math.floor(cellSize * 0.25), cellSize);
-  for (let dy = 2; dy < bevelEnd; dy++) {
+  const bevelEnd = Math.min(Math.floor(cellSize * 0.30), cellSize);
+  // Start at dy=2 to skip border-gray rows. For cells at image edges
+  // (added by grid extension), the bevel may start at dy=0-1 since there's
+  // no border above/left. Use dy=1 for edge cells.
+  const atBottomEdge = cellY + cellSize >= img.height - 2;
+  const atTopEdge = cellY <= 2;
+  const bevelStart = (atBottomEdge || atTopEdge) ? 1 : 2;
+  for (let dy = bevelStart; dy < bevelEnd; dy++) {
     let brights = 0;
     const y = cellY + dy;
     if (y >= img.height) continue;
@@ -322,10 +335,7 @@ export function classifyClassicCell(
       const x = cellX + dx;
       if (x >= img.width) continue;
       const [r, g, b] = getPixel(img, x, y);
-      // White bevel OR bright tinted bevel (any channel >= 240, all >= 180)
-      if (isWhite(r, g, b) || (Math.max(r, g, b) >= 240 && Math.min(r, g, b) >= 180)) {
-        brights++;
-      }
+      if (isBevelBright(r, g, b)) brights++;
     }
     if (brights > maxBrightInRow) maxBrightInRow = brights;
   }
