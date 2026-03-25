@@ -103,16 +103,43 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
     let { rows, cols } = grid;
 
     function isFrameRow(r: CellState[]): boolean {
-      return r.every((c) => c === "hidden" || c === "empty");
+      if (r.every((c) => c === "hidden" || c === "empty")) return true;
+      // Rows with many "8"s are non-board content (header/UI). In real
+      // minesweeper, "8" (all 8 neighbors are mines) is essentially impossible.
+      const eightCount = r.filter((c) => c === "8").length;
+      if (eightCount > r.length * 0.25) return true;
+      // Edge rows that are mostly empty with rare digits (7/8) are non-board.
+      // "7" or "8" on an edge row is mathematically suspect — edge cells have
+      // at most 5 neighbors, making high neighbor counts impossible.
+      const emptyCount = r.filter((c) => c === "empty").length;
+      if (emptyCount > r.length * 0.5 &&
+          r.some((c) => c === "7" || c === "8")) return true;
+      // Runs of 3+ rare digits (5-8) are non-board content (timer/score
+      // display). These digits require most/all neighbors to be mines,
+      // so consecutive runs are essentially impossible in real games.
+      const rareDigits = new Set<CellState>(["5", "6", "7", "8"]);
+      let run = 1;
+      for (let i = 1; i < r.length; i++) {
+        if (r[i] === r[i - 1] && rareDigits.has(r[i]!)) {
+          run++;
+          if (run >= 3) return true;
+        } else {
+          run = 1;
+        }
+      }
+      return false;
     }
 
     function isFrameCol(colIdx: number): boolean {
       const states = board.map((r) => r[colIdx]!);
       // All hidden/empty
       if (states.every((c) => c === "hidden" || c === "empty")) return true;
-      // All the same digit (frame border misclassified as a uniform number)
+      // All the same digit with enough cells to be confident it's a frame
+      // artifact (e.g., a full column of "7"s from dark frame pixels).
+      // Require at least 50% of the column to be the repeated digit.
       const nonEmpty = states.filter((c) => c !== "hidden" && c !== "empty");
-      if (nonEmpty.length > 0 && nonEmpty.every((c) => c === nonEmpty[0])) return true;
+      if (nonEmpty.length >= states.length * 0.5 &&
+          nonEmpty.every((c) => c === nonEmpty[0])) return true;
       return false;
     }
 
