@@ -20,11 +20,11 @@ const BORDER_TOL = 4;
 const FACE_TOL = 6;
 const WHITE_TOL = 8;
 
-function isBorderGray(r: number, g: number, b: number): boolean {
-  return Math.abs(r - 128) <= BORDER_TOL &&
-         Math.abs(g - 128) <= BORDER_TOL &&
-         Math.abs(b - 128) <= BORDER_TOL &&
-         Math.max(r, g, b) - Math.min(r, g, b) <= 6;
+function isBorderGray(r: number, g: number, b: number, tol: number = BORDER_TOL): boolean {
+  return Math.abs(r - 128) <= tol &&
+         Math.abs(g - 128) <= tol &&
+         Math.abs(b - 128) <= tol &&
+         Math.max(r, g, b) - Math.min(r, g, b) <= Math.max(6, tol);
 }
 
 function isFaceGray(r: number, g: number, b: number): boolean {
@@ -43,6 +43,15 @@ function isWhite(r: number, g: number, b: number): boolean {
 export function detectClassicGrid(img: ImageData): {
   colBorders: number[]; rowBorders: number[]; cellSize: number; rows: number; cols: number;
 } | null {
+  // Try with strict tolerance first, then retry with wider tolerance
+  // for images with slightly shifted border colors.
+  return detectClassicGridWithTol(img, BORDER_TOL)
+      ?? detectClassicGridWithTol(img, BORDER_TOL * 2);
+}
+
+function detectClassicGridWithTol(img: ImageData, borderTol: number): {
+  colBorders: number[]; rowBorders: number[]; cellSize: number; rows: number; cols: number;
+} | null {
   const { width, height } = img;
 
   // Scan multiple horizontal rows for 128-gray border pixels and merge results.
@@ -53,7 +62,7 @@ export function detectClassicGrid(img: ImageData): {
   for (const scanY of scanYs) {
     for (let x = 0; x < width; x++) {
       const [r, g, b] = getPixel(img, x, scanY);
-      if (isBorderGray(r, g, b)) {
+      if (isBorderGray(r, g, b, borderTol)) {
         hBorderSet.add(x);
       }
     }
@@ -111,7 +120,7 @@ export function detectClassicGrid(img: ImageData): {
     const scanX = Math.floor((gridCols[colIdx]! + gridCols[colIdx + 1]!) / 2);
     for (let y = 0; y < height; y++) {
       const [r, g, b] = getPixel(img, scanX, y);
-      if (isBorderGray(r, g, b)) {
+      if (isBorderGray(r, g, b, borderTol)) {
         vBorderSet.add(y);
       }
     }
@@ -143,7 +152,7 @@ export function detectClassicGrid(img: ImageData): {
   if (cellBeforeRow >= 0) {
     const midX = gridCols[Math.floor(gridCols.length / 2)]!;
     const [r, g, b] = getPixel(img, midX, cellBeforeRow);
-    if (isBorderGray(r, g, b) && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
+    if (isBorderGray(r, g, b, borderTol) && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
       gridRows.unshift(cellBeforeRow);
     }
   }
@@ -151,7 +160,7 @@ export function detectClassicGrid(img: ImageData): {
   // Find frame borders: solid 128-gray OR very dark (< 40) columns/rows.
   // Classic minesweeper frames can be either gray border or dark background.
   function isFramePixel(r: number, g: number, b: number): boolean {
-    return isBorderGray(r, g, b) || (r < 40 && g < 40 && b < 40);
+    return isBorderGray(r, g, b, borderTol) || (r < 40 && g < 40 && b < 40);
   }
 
   // Search from the midpoint of the last detected cell — the frame may start
