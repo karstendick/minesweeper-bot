@@ -61,7 +61,7 @@ function findAlignment(
 // Generate one test per ground truth file
 const gtFiles = readdirSync(GT_DIR).filter((f) => f.endsWith(".txt"));
 
-describe("Clean One grid detection", () => {
+describe("Board detection", () => {
   for (const gtFile of gtFiles) {
     const imageName = gtFile.replace(".txt", "");
 

@@ -10,7 +10,9 @@
  */
 
 import { getPixel } from "../image-utils.js";
+import { extractDigitBitmap, matchDigit } from "../template-matching.js";
 import type { CellState, ImageData } from "../types.js";
+import { CLASSIC_TEMPLATES } from "./classic-templates.js";
 
 // --- Color predicates ---
 
@@ -146,30 +148,39 @@ export function detectClassicGrid(img: ImageData): {
     }
   }
 
-  // Find frame borders (solid 128 columns/rows)
+  // Find frame borders: solid 128-gray OR very dark (< 40) columns/rows.
+  // Classic minesweeper frames can be either gray border or dark background.
+  function isFramePixel(r: number, g: number, b: number): boolean {
+    return isBorderGray(r, g, b) || (r < 40 && g < 40 && b < 40);
+  }
+
+  // Search from the midpoint of the last detected cell — the frame may start
+  // within the last cell if the grid extension overshot.
   let rightFrame = width;
-  for (let x = gridCols[gridCols.length - 1]! + cellSize; x < width; x++) {
-    let is128count = 0;
+  const rightSearchStart = gridCols[gridCols.length - 1]! + Math.floor(cellSize / 2);
+  for (let x = rightSearchStart; x < width; x++) {
+    let frameCount = 0;
     for (let y = gridRows[0]!; y < gridRows[gridRows.length - 1]!; y += 10) {
       const [r, g, b] = getPixel(img, x, y);
-      if (isBorderGray(r, g, b)) is128count++;
+      if (isFramePixel(r, g, b)) frameCount++;
     }
     const totalSamples = Math.floor((gridRows[gridRows.length - 1]! - gridRows[0]!) / 10);
-    if (is128count > totalSamples * 0.8) {
+    if (frameCount > totalSamples * 0.8) {
       rightFrame = x;
       break;
     }
   }
 
+  const bottomSearchStart = gridRows[gridRows.length - 1]! + Math.floor(cellSize / 2);
   let bottomFrame = height;
-  for (let y = gridRows[gridRows.length - 1]! + cellSize; y < height; y++) {
-    let is128count = 0;
+  for (let y = bottomSearchStart; y < height; y++) {
+    let frameCount = 0;
     for (let x = gridCols[0]!; x < gridCols[gridCols.length - 1]!; x += 10) {
       const [r, g, b] = getPixel(img, x, y);
-      if (isBorderGray(r, g, b)) is128count++;
+      if (isFramePixel(r, g, b)) frameCount++;
     }
     const totalSamples = Math.floor((gridCols[gridCols.length - 1]! - gridCols[0]!) / 10);
-    if (is128count > totalSamples * 0.8) {
+    if (frameCount > totalSamples * 0.8) {
       bottomFrame = y;
       break;
     }
@@ -265,14 +276,12 @@ function hasBoardContent(img: ImageData, cellX: number, cellY: number, cellSize:
 
 // --- Cell classification ---
 
-interface ColorSignature {
-  state: CellState;
-  r: number;
-  g: number;
-  b: number;
-}
+// Classic glyph threshold: digits are dark/colored on ~198 gray background.
+// Anything with brightness < 150 is a digit pixel.
+const CLASSIC_GLYPH_THRESHOLD = 150;
 
-const CLASSIC_COLORS: ColorSignature[] = [
+// Known number colors for fallback color matching at small cell sizes.
+const CLASSIC_COLORS: { state: CellState; r: number; g: number; b: number }[] = [
   { state: "1", r: 0, g: 0, b: 247 },
   { state: "2", r: 0, g: 119, b: 0 },
   { state: "3", r: 236, g: 0, b: 0 },
@@ -289,18 +298,13 @@ export function classifyClassicCell(
   cellY: number,
   cellSize: number
 ): CellState {
-  const inset = 3;
-  const innerX = cellX + inset;
-  const innerY = cellY + inset;
-  const innerSize = cellSize - 2 * inset;
-
-  if (innerSize <= 0) return "unknown";
+  if (cellSize <= 6) return "unknown";
 
   // Hidden/flag detection: scan for bright bevel strip at the top of the cell.
   // Normal hidden cells have white (255) bevel pixels. Green-highlighted "safe"
   // cells have bright green-tinted bevel pixels. Both indicate hidden state.
   let maxBrightInRow = 0;
-  const bevelEnd = Math.min(Math.floor(cellSize * 0.2), cellSize);
+  const bevelEnd = Math.min(Math.floor(cellSize * 0.25), cellSize);
   for (let dy = 2; dy < bevelEnd; dy++) {
     let brights = 0;
     const y = cellY + dy;
@@ -321,6 +325,7 @@ export function classifyClassicCell(
 
   if (isHiddenBevel) {
     let redPixels = 0;
+    const inset = 3;
     for (let dy = inset; dy < cellSize - inset; dy++) {
       for (let dx = inset; dx < cellSize - inset; dx++) {
         const x = cellX + dx;
@@ -334,49 +339,86 @@ export function classifyClassicCell(
     return "hidden";
   }
 
-  // Empty cell: all interior pixels are ~198
-  let allGray = true;
-  for (let dy = 1; dy < innerSize - 1; dy++) {
-    for (let dx = 1; dx < innerSize - 1; dx++) {
-      const [r, g, b] = getPixel(img, innerX + dx, innerY + dy);
-      const colorfulness = Math.max(r, g, b) - Math.min(r, g, b);
-      if (colorfulness > 10 || r < 150) {
-        allGray = false;
-        break;
-      }
-    }
-    if (!allGray) break;
-  }
-
-  if (allGray) return "empty";
-
-  // Number detection: color matching
-  let bestMatch: CellState = "unknown";
-  let bestScore = 0;
-
+  // Scan interior for colored/dark pixels. Use small inset (3px) for color
+  // collection since the colorfulness filter already excludes gray border pixels.
+  const colorInset = 3;
   const coloredPixels: [number, number, number][] = [];
-  for (let dy = 1; dy < innerSize - 1; dy++) {
-    for (let dx = 1; dx < innerSize - 1; dx++) {
-      const pixel = getPixel(img, innerX + dx, innerY + dy);
-      const [r, g, b] = pixel;
+  let totalPixels = 0;
+
+  for (let dy = colorInset; dy < cellSize - colorInset; dy++) {
+    for (let dx = colorInset; dx < cellSize - colorInset; dx++) {
+      const x = cellX + dx, y = cellY + dy;
+      if (x >= img.width || y >= img.height) continue;
+      totalPixels++;
+      const [r, g, b] = getPixel(img, x, y);
       const colorfulness = Math.max(r, g, b) - Math.min(r, g, b);
       const brightness = (r + g + b) / 3;
       if ((colorfulness > 20 || brightness < 50) && !(r >= 190 && g >= 190 && b >= 190)) {
-        coloredPixels.push(pixel);
+        coloredPixels.push([r, g, b]);
       }
     }
   }
 
+  // Empty cell: very few colored/dark pixels in interior
+  if (totalPixels === 0 || coloredPixels.length / totalPixels < 0.05) return "empty";
+
+  // Try template matching first (works well for cells >= ~50px)
+  const bitmap = extractDigitBitmap(
+    img, cellX, cellY, cellSize, cellSize,
+    CLASSIC_GLYPH_THRESHOLD,
+    true, // invertGlyph: dark pixels = foreground
+    0.20, // larger margin to skip border area
+  );
+
+  // Compute color average from most saturated pixels (resists JPEG dilution)
+  let avgR = 0, avgG = 0, avgB = 0;
+  if (coloredPixels.length > 0) {
+    const sorted = coloredPixels
+      .map(([r, g, b]) => ({ r, g, b, sat: Math.max(r, g, b) - Math.min(r, g, b) }))
+      .sort((a, b) => b.sat - a.sat);
+    const topN = Math.max(3, Math.floor(sorted.length / 2));
+    const top = sorted.slice(0, topN);
+    for (const p of top) { avgR += p.r; avgG += p.g; avgB += p.b; }
+    avgR /= top.length; avgG /= top.length; avgB /= top.length;
+  }
+
+  if (bitmap) {
+    // Use higher threshold for small cells where bitmaps are noisy
+    const minScore = cellSize >= 50 ? 0.25 : 0.40;
+    const tmplResult = matchDigit(bitmap, CLASSIC_TEMPLATES, minScore);
+    if (tmplResult !== "unknown") {
+      // Validate template result against pixel colors: the expected color
+      // for the matched digit should be closer than any other digit's color.
+      // This prevents e.g. a "2" template matching a teal "6" cell.
+      const expectedSig = CLASSIC_COLORS.find((c) => c.state === tmplResult);
+      if (expectedSig) {
+        const tmplDist = Math.sqrt(
+          (avgR - expectedSig.r) ** 2 + (avgG - expectedSig.g) ** 2 + (avgB - expectedSig.b) ** 2
+        );
+        let colorBest: CellState = "unknown";
+        let colorBestDist = Infinity;
+        for (const sig of CLASSIC_COLORS) {
+          const d = Math.sqrt(
+            (avgR - sig.r) ** 2 + (avgG - sig.g) ** 2 + (avgB - sig.b) ** 2
+          );
+          if (d < colorBestDist) { colorBestDist = d; colorBest = sig.state; }
+        }
+        // If color agrees with template, or template color is close enough, use template
+        if (colorBest === tmplResult || tmplDist < colorBestDist * 1.5) {
+          return tmplResult;
+        }
+        // Otherwise color disagrees — fall through to color matching
+      } else {
+        return tmplResult;
+      }
+    }
+  }
+
+  // Color matching
   if (coloredPixels.length === 0) return "empty";
 
-  let avgR = 0, avgG = 0, avgB = 0;
-  for (const [r, g, b] of coloredPixels) {
-    avgR += r; avgG += g; avgB += b;
-  }
-  avgR /= coloredPixels.length;
-  avgG /= coloredPixels.length;
-  avgB /= coloredPixels.length;
-
+  let bestMatch: CellState = "unknown";
+  let bestScore = 0;
   for (const sig of CLASSIC_COLORS) {
     const dist = Math.sqrt(
       (avgR - sig.r) ** 2 + (avgG - sig.g) ** 2 + (avgB - sig.b) ** 2

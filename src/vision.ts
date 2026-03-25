@@ -88,25 +88,47 @@ export async function detectBoard(imagePath: string): Promise<BoardDetectionResu
       for (let col = 0; col < grid.cols; col++) {
         const cellX = grid.colBorders[col]!;
         const cellW = grid.colBorders[col + 1]! - cellX;
-        const state = classifyClassicCell(img, cellX, cellY, Math.min(cellW, cellH));
+        // Use grid.cellSize but don't exceed the actual cell bounds
+        const size = Math.min(grid.cellSize, cellW, cellH);
+        const state = classifyClassicCell(img, cellX, cellY, size);
         rowCells.push(state);
       }
       board.push(rowCells);
     }
 
-    // Trim edge rows that are frame/header — they contain only hidden+empty
-    // (real board rows have numbers, flags, or a mix of states)
+    // Trim edge rows/columns that are frame artifacts.
+    // Frame rows: all hidden+empty. Frame columns: all hidden+empty, or
+    // all the same single digit (e.g., a column of "7" from dark frame pixels).
     let { colBorders, rowBorders } = grid;
     let { rows, cols } = grid;
 
     function isFrameRow(r: CellState[]): boolean {
       return r.every((c) => c === "hidden" || c === "empty");
     }
+
+    function isFrameCol(colIdx: number): boolean {
+      const states = board.map((r) => r[colIdx]!);
+      // All hidden/empty
+      if (states.every((c) => c === "hidden" || c === "empty")) return true;
+      // All the same digit (frame border misclassified as a uniform number)
+      const nonEmpty = states.filter((c) => c !== "hidden" && c !== "empty");
+      if (nonEmpty.length > 0 && nonEmpty.every((c) => c === nonEmpty[0])) return true;
+      return false;
+    }
+
     while (rows > 0 && isFrameRow(board[0]!)) {
       board.shift(); rowBorders = rowBorders.slice(1); rows--;
     }
     while (rows > 0 && isFrameRow(board[rows - 1]!)) {
       board.pop(); rowBorders = rowBorders.slice(0, -1); rows--;
+    }
+    while (cols > 0 && isFrameCol(0)) {
+      for (const r of board) r.shift();
+      colBorders = colBorders.slice(1); cols--;
+    }
+    while (cols > 0 && isFrameCol(cols - 1)) {
+      for (const r of board) r.pop();
+      colBorders = colBorders.slice(0, -1); cols--;
     }
 
     if (rows < 3 || cols < 3) return null;
