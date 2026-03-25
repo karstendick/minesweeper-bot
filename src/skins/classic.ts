@@ -146,11 +146,26 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
     gridCols.unshift(cellBeforeCol);
   }
 
+  // Try to extend the grid one row upward. Search a small range around the
+  // expected position for a border pixel (grids can be offset by a few pixels).
+  // If no border pixel is found, still add the row if there's clear board content.
   const cellBeforeRow = firstRowY - cellSize;
   if (cellBeforeRow >= 0) {
     const midX = gridCols[Math.floor(gridCols.length / 2)]!;
-    const [r, g, b] = getPixel(img, midX, cellBeforeRow);
-    if (isBorderGray(r, g, b, borderTol) && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
+    let added = false;
+    for (let yOff = -5; yOff <= 5; yOff++) {
+      const testY = cellBeforeRow + yOff;
+      if (testY < 0) continue;
+      const [r, g, b] = getPixel(img, midX, testY);
+      if (isBorderGray(r, g, b, borderTol) && hasBoardContent(img, firstColX, testY, cellSize)) {
+        gridRows.unshift(testY);
+        added = true;
+        break;
+      }
+    }
+    // Fallback: add based on board content alone (e.g., header-to-board boundary
+    // doesn't use standard border gray)
+    if (!added && cellBeforeRow >= 0 && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
       gridRows.unshift(cellBeforeRow);
     }
   }
@@ -158,7 +173,13 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
   // Find frame borders: solid 128-gray OR very dark (< 40) columns/rows.
   // Classic minesweeper frames can be either gray border or dark background.
   function isFramePixel(r: number, g: number, b: number): boolean {
-    return isBorderGray(r, g, b, borderTol) || (r < 40 && g < 40 && b < 40);
+    // Border gray, dark background, or light window frame (220-250 neutral gray)
+    if (isBorderGray(r, g, b, borderTol)) return true;
+    if (r < 40 && g < 40 && b < 40) return true;
+    const brightness = (r + g + b) / 3;
+    if (brightness >= 220 && brightness <= 250 &&
+        Math.max(r, g, b) - Math.min(r, g, b) <= 10) return true;
+    return false;
   }
 
   // Search from the midpoint of the last detected cell — the frame may start
@@ -178,9 +199,18 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
     }
   }
 
-  const bottomSearchStart = gridRows[gridRows.length - 1]! + Math.floor(cellSize / 2);
+  // Search for bottom frame. Start from a few cells before the last detected
+  // border — findGridLines may have extended into the frame area. Require
+  // 3+ consecutive frame rows to distinguish thick frame borders from thin
+  // cell borders (1-2px of 128 gray).
   let bottomFrame = height;
-  for (let y = bottomSearchStart; y < height; y++) {
+  // For large grids (>15 rows), search for the frame earlier since
+  // findGridLines may have extended far into the window frame area.
+  const bottomSearchFrom = gridRows.length > 18
+    ? gridRows[gridRows.length - 5]! + Math.floor(cellSize / 2)
+    : gridRows[gridRows.length - 1]! + Math.floor(cellSize / 2);
+  let consecutiveFrameRows = 0;
+  for (let y = bottomSearchFrom; y < height; y++) {
     let frameCount = 0;
     for (let x = gridCols[0]!; x < gridCols[gridCols.length - 1]!; x += 10) {
       const [r, g, b] = getPixel(img, x, y);
@@ -188,9 +218,23 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
     }
     const totalSamples = Math.floor((gridCols[gridCols.length - 1]! - gridCols[0]!) / 10);
     if (frameCount > totalSamples * 0.8) {
-      bottomFrame = y;
-      break;
+      consecutiveFrameRows++;
+      if (consecutiveFrameRows >= 3) {
+        bottomFrame = y - 2; // start of the frame block
+        break;
+      }
+    } else {
+      consecutiveFrameRows = 0;
     }
+  }
+
+  // Trim grid borders whose cells would extend into or past the frame.
+  // Also remove borders that fall within the frame itself.
+  while (gridCols.length > 2 && gridCols[gridCols.length - 1]! + cellSize > rightFrame + cellSize / 2) {
+    gridCols.pop();
+  }
+  while (gridRows.length > 2 && gridRows[gridRows.length - 1]! + cellSize > bottomFrame + cellSize / 2) {
+    gridRows.pop();
   }
 
   // Extend columns/rows up to frame borders
@@ -282,6 +326,9 @@ function hasBoardContent(img: ImageData, cellX: number, cellY: number, cellSize:
   }
 
   if (total === 0) return false;
+  // Real board cells have face gray interiors. Cells that are only white
+  // (bevel) or only border gray (frame shadow) aren't real board content.
+  if (countFace === 0 && countColor === 0) return false;
   return (countFace + countColor + countWhite) / total > 0.3;
 }
 
