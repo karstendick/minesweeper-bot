@@ -137,36 +137,46 @@ function detectClassicGridWithTol(img: ImageData, borderTol: number): {
   const gridRows = findGridLines(vBorderLines, cellSize);
   if (gridRows.length < 4) return null;
 
-  // Extend grid to include cells before/after detected borders
-  const firstColX = gridCols[0]!;
-  const firstRowY = gridRows[0]!;
+  // Extend grid to include cells before/after detected borders.
+  // Use loops to add multiple columns/rows (not just one).
+  const midRow0 = gridRows[Math.floor(gridRows.length / 2)]!;
 
-  const cellBeforeCol = firstColX - cellSize;
-  if (cellBeforeCol >= 0 && hasBoardContent(img, cellBeforeCol, firstRowY, cellSize)) {
-    gridCols.unshift(cellBeforeCol);
+  // Extend columns leftward
+  while (true) {
+    const firstX = gridCols[0]!;
+    const prevX = firstX - cellSize;
+    if (prevX < 0) break;
+    if (!hasBoardContent(img, prevX, midRow0, cellSize)) break;
+    gridCols.unshift(prevX);
   }
 
-  // Try to extend the grid one row upward. Search a small range around the
-  // expected position for a border pixel (grids can be offset by a few pixels).
-  // If no border pixel is found, still add the row if there's clear board content.
-  const cellBeforeRow = firstRowY - cellSize;
-  if (cellBeforeRow >= 0) {
+  // Extend rows upward — require border gray pixel to prevent extending
+  // into the header area which also has face gray.
+  while (true) {
+    const firstY = gridRows[0]!;
+    const prevY = firstY - cellSize;
+    if (prevY < 0) break;
     const midX = gridCols[Math.floor(gridCols.length / 2)]!;
     let added = false;
     for (let yOff = -5; yOff <= 5; yOff++) {
-      const testY = cellBeforeRow + yOff;
+      const testY = prevY + yOff;
       if (testY < 0) continue;
       const [r, g, b] = getPixel(img, midX, testY);
-      if (isBorderGray(r, g, b, borderTol) && hasBoardContent(img, firstColX, testY, cellSize)) {
+      if (isBorderGray(r, g, b, borderTol) && hasBoardContent(img, gridCols[0]!, testY, cellSize)) {
         gridRows.unshift(testY);
         added = true;
         break;
       }
     }
-    // Fallback: add based on board content alone (e.g., header-to-board boundary
-    // doesn't use standard border gray)
-    if (!added && cellBeforeRow >= 0 && hasBoardContent(img, firstColX, cellBeforeRow, cellSize)) {
-      gridRows.unshift(cellBeforeRow);
+    if (!added) break;
+  }
+  // Try one more row based on content alone (handles cases where the
+  // header-to-board boundary doesn't use standard border gray).
+  {
+    const firstY = gridRows[0]!;
+    const prevY = firstY - cellSize;
+    if (prevY >= 0 && hasBoardContent(img, gridCols[0]!, prevY, cellSize)) {
+      gridRows.unshift(prevY);
     }
   }
 
